@@ -5,64 +5,103 @@ Multi-view action clip annotator & exporter for motion capture data.
 ## Features
 
 - **Multi-scene management** — Load an Excel file with multiple scene sheets, switch between scenes via dropdown
+- **Flexible data layout** — Supports several parallel folder structures (see below)
 - **Auto data discovery** — Automatically matches scene names to data subfolders and extracted CSV files
-- **Multi-camera view** — Switch between up to 7 camera angles (topleft, topcenter, topright, bottomleft, bottomcenter, bottomright, diagonal)
+- **Multi-camera view** — Switch between up to 7 camera angles
 - **3D skeleton overlay** — Projects 3D joint positions onto video frames using camera calibration
 - **Per-action offset** — Adjust sync offset at scene level and per-action level, with inheritance
-- **Persistent offsets** — All offsets auto-save to a JSON file next to the Excel, restored on reload
+- **Persistent offsets** — All offsets auto-save to a JSON sidecar file, restored on reload
 - **Loop playback** — Clips auto-replay for easy review
 - **Export** — Export trimmed video clips + 3D point CSV, single camera or all cameras
 
 ## Data Layout
 
+CVSlice is flexible about how you organize your files. The tool asks you to load three things separately:
+
+1. **Excel file** — Action definitions (one sheet per scene)
+2. **Data root folder** — Contains CSVs and video files
+3. **Calibration folder** — Contains camera intrinsic/extrinsic JSONs
+
+### Recommended structure (flat)
+
 ```
-data/
+project/
+├── DataCollection.xlsx
 ├── calibration/
 │   ├── cali4_topleft_extrinsics.json
 │   ├── cali4_topleft_intrinsic_1280x720.json
 │   └── ...
-├── DataCollection_15.xlsx          # Action definitions (one sheet per scene)
-├── extracted_boss_01.csv           # 3D points CSV (can be in root or subfolder)
-└── trove_15/
-    ├── extracted_trove_15.csv      # 3D points CSV
-    ├── trove_15_topleft.mp4        # Camera videos
-    ├── trove_15_topcenter.mp4
-    └── ...
+└── data/
+    ├── trove_15/
+    │   ├── extracted_trove_15.csv
+    │   ├── trove_15_topleft.mp4
+    │   ├── trove_15_topcenter.mp4
+    │   └── ...
+    ├── boss/
+    │   ├── extracted_boss_01.csv
+    │   └── ...
+    └── extracted_star_01.csv          ← CSVs in root also work
 ```
 
-### Excel Format
+### Also supported
 
-Each sheet represents a scene. Expected columns:
-- `No.` — Action number
+- CSV files directly in the data root (matched by scene name)
+- Scenes with only CSV data and no video files (renders on black background)
+- Scenes with only video files and no CSV
+- Any mix of the above
+
+### Discovery logic
+
+When you select a scene (Excel sheet), CVSlice:
+1. Looks for a subfolder in the data root whose name matches the sheet name (fuzzy)
+2. Inside that subfolder, looks for `extracted*.csv` and `*_{camera}.mp4` files
+3. If no subfolder match, scans the data root itself for matching CSVs
+
+### Excel format
+
+Each sheet = one scene. Expected columns:
+- `No.` — Action number (optional)
 - `Action` — Action name (forward-filled for grouped rows)
 - Variant column (next to Action) — Direction/position details
 - Numeric columns — Start/end frame pairs (auto-detected)
 
-### Extracted CSV Format
+### CSV format
 
-Columns: `0_x, 0_y, 0_z, 1_x, 1_y, 1_z, ...` (24 joints × 3 coordinates = 72 columns)
+Columns: `0_x, 0_y, 0_z, 1_x, 1_y, 1_z, ...` — one joint per 3 columns, one row per frame.
 
-Each row is one frame of 3D joint positions.
-
-## Usage
+## Installation
 
 ```bash
 pip install -r requirements.txt
-python cvslice.py
+python main.py
 ```
 
-### Workflow
+Or use the pre-built Windows executable: `dist/CVSlice.exe`
 
-1. **File → Load Excel** — Select the Excel file with action definitions
-2. **File → Load Data Root Folder** — Select the root data directory
-3. **File → Load Calibration Folder** — Select the calibration JSON directory
-4. **Scene dropdown** — Switch between scenes (auto-discovers matching CSV + videos)
-5. **Action list** — Click to preview; right-click to add repetitions or delete
-6. **Camera dropdown** — Switch camera view
-7. **Adjust offsets** — Scene offset (W/S keys) and per-action offset
-8. **Export** — Single clip or all clips, single camera or all cameras
+## Project Structure
 
-### Keyboard Shortcuts
+```
+cvslice/
+├── main.py                  # Entry point
+├── requirements.txt
+├── build.bat                # PyInstaller build script (Windows)
+└── cvslice/                 # Package
+    ├── __init__.py
+    ├── core/                # Constants, utilities
+    │   ├── constants.py     # Camera names, skeleton topology, defaults
+    │   └── utils.py         # fmt_time, v2p, make_label
+    ├── io/                  # File I/O and data discovery
+    │   ├── excel.py         # Excel sheet parser
+    │   ├── calibration.py   # Camera calibration loader
+    │   ├── discovery.py     # Scene-to-data matching, CSV loading
+    │   └── annotations.py   # Offset persistence (JSON)
+    ├── vision/              # Computer vision
+    │   └── projection.py    # 3D→2D projection, skeleton drawing
+    └── ui/                  # GUI
+        └── main_window.py   # Main application window
+```
+
+## Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
