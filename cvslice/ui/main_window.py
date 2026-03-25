@@ -840,32 +840,62 @@ class ClipAnnotator(QMainWindow):
     #  Export
     # =======================================================================
 
-    def _build_export_name(self, seq: int, scene: str, cam: str,
-                           action_dict: dict) -> str:
-        """Build the export filename stem: 01-boss-topcenter-walk-rep1."""
-        scene_s = scene.lower().replace(" ", "_").replace("/", "_") if scene else "unknown"
-        cam_s = cam.lower().replace(" ", "_")
-        act_s = action_dict["action"].lower().replace(" ", "_").replace("/", "_")
-        if action_dict.get("variant"):
-            act_s += f"-{action_dict['variant'].lower().replace(' ', '_')}"
-        rep = action_dict.get("rep", "rep1")
-        if not rep:
-            rep = "rep1"
-        return f"{seq:02d}-{scene_s}-{cam_s}-{act_s}-{rep}"
+    def _make_action_tag(self, action_dict: dict) -> str:
+        """Merge action + variant into a single tag: e.g. 'walk_clockwise'."""
+        act = action_dict["action"].strip().lower().replace(" ", "_").replace("/", "_")
+        var = (action_dict.get("variant") or "").strip().lower().replace(" ", "_").replace("/", "_")
+        if var:
+            act = f"{act}_{var}"
+        return act
 
-    def _preview_export_names(self, indices: list[int],
-                              export_cams: list[str],
-                              start_seq: int) -> list[tuple[int, int, str, str]]:
-        """Generate (action_idx, cam_idx, stem, cam_name) for all export items."""
-        items = []
+    def _assign_reps(self, indices: list[int]) -> dict[int, int]:
+        """Assign rep numbers per action tag, starting from 1.
+
+        Returns {action_index: rep_number}.
+        """
+        counts: dict[str, int] = {}  # action_tag -> next rep
+        result: dict[int, int] = {}
+        for ai in indices:
+            tag = self._make_action_tag(self.actions[ai])
+            rep = counts.get(tag, 1)
+            result[ai] = rep
+            counts[tag] = rep + 1
+        return result
+
+    def _build_export_stem(self, cam: str, action_dict: dict, rep: int) -> str:
+        """Build filename stem: topcenter-walk_clockwise-rep1."""
+        cam_s = cam.lower().replace(" ", "_")
+        act_tag = self._make_action_tag(action_dict)
+        return f"{cam_s}-{act_tag}-rep{rep}"
+
+    def _build_export_dir_name(self, seq: int, scene: str) -> str:
+        """Build directory name: 01-boss."""
+        scene_s = scene.lower().replace(" ", "_").replace("/", "_") if scene else "unknown"
+        return f"{seq:02d}-{scene_s}"
+
+    def _preview_export_tree(self, indices: list[int],
+                             export_cams: list[str],
+                             start_seq: int) -> list[str]:
+        """Generate preview lines showing the full export tree."""
+        reps = self._assign_reps(indices)
+        lines = []
         seq = start_seq
         for ai in indices:
             a = self.actions[ai]
-            for ci, cn in enumerate(export_cams):
-                stem = self._build_export_name(seq, self.cur_scene, cn, a)
-                items.append((ai, ci, stem, cn))
+            rep = reps[ai]
+            dir_name = self._build_export_dir_name(seq, self.cur_scene)
+            act_tag = self._make_action_tag(a)
+            lines.append(f"{dir_name}/")
+            for cn in export_cams:
+                stem = self._build_export_stem(cn, a, rep)
+                lines.append(f"  {stem}.mp4")
+            if self.pts3d is not None:
+                lines.append(f"  {act_tag}-rep{rep}.csv  (3D points)")
+            lines.append(f"  offsets.json")
+            lines.append(f"  calibration/  (camera params)")
+            lines.append("")
             seq += 1
-        return items
+        return lines
 
     def _export(self, all_actions, single_cam=False):
         if not self.actions:
@@ -887,22 +917,15 @@ class ClipAnnotator(QMainWindow):
         else:
             export_cams = self.avail_cams if self.avail_cams else ["virtual"]
 
-        # --- Preview dialog with editable starting sequence number ---
-        preview = self._preview_export_names(indices, export_cams, 1)
-        # Build a sample text showing all filenames
-        sample_lines = []
-        for ai, ci, stem, cn in preview:
-            sample_lines.append(f"  {stem}.mp4")
-            if ci == 0 and self.pts3d is not None:
-                sample_lines.append(f"  {stem}.csv  (3D points)")
-        preview_text = "\n".join(sample_lines)
+        # --- Preview dialog ---
+        preview_lines = self._preview_export_tree(indices, export_cams, 1)
 
         from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QTextEdit
         dlg = QDialog(self)
         dlg.setWindowTitle("Export Preview")
-        dlg.setMinimumSize(600, 400)
+        dlg.setMinimumSize(620, 450)
         lay = QVBoxLayout(dlg)
-        lay.addWidget(QLabel("Export filenames preview — edit starting sequence:"))
+        lay.addWidget(QLabel("Export preview — confirm directory structure:"))
         seq_row = QHBoxLayout()
         seq_row.addWidget(QLabel("Starting sequence number:"))
         seq_spin = QSpinBox()
@@ -913,21 +936,15 @@ class ClipAnnotator(QMainWindow):
         lay.addLayout(seq_row)
         te = QTextEdit()
         te.setReadOnly(True)
-        te.setPlainText(preview_text)
-        te.setFont(te.document().defaultFont())
+        te.setPlainText("\n".join(preview_lines))
         lay.addWidget(te)
 
-        def _refresh_preview():
-            new_preview = self._preview_export_names(
+        def _refresh():
+            lines = self._preview_export_tree(
                 indices, export_cams, seq_spin.value())
-            lines = []
-            for ai2, ci2, stem2, cn2 in new_preview:
-                lines.append(f"  {stem2}.mp4")
-                if ci2 == 0 and self.pts3d is not None:
-                    lines.append(f"  {stem2}.csv  (3D points)")
             te.setPlainText("\n".join(lines))
 
-        seq_spin.valueChanged.connect(_refresh_preview)
+        seq_spin.valueChanged.connect(_refresh)
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
@@ -937,29 +954,58 @@ class ClipAnnotator(QMainWindow):
             return
 
         start_seq = seq_spin.value()
-        final_items = self._preview_export_names(indices, export_cams, start_seq)
+        reps = self._assign_reps(indices)
 
-        # Group by action index for shared CSV export
-        from collections import defaultdict
-        action_items = defaultdict(list)  # ai -> [(ci, stem, cn), ...]
-        for ai, ci, stem, cn in final_items:
-            action_items[ai].append((ci, stem, cn))
-
-        total_ops = len(final_items)
+        total_ops = len(indices) * len(export_cams)
         prog = QProgressDialog("Exporting...", "Cancel", 0, total_ops, self)
         prog.setWindowModality(Qt.WindowModal); prog.setMinimumDuration(0)
         op = 0
+        seq = start_seq
 
-        for ai, cam_items in action_items.items():
+        for ai in indices:
             a = self.actions[ai]
+            rep = reps[ai]
             ov = self.overrides.get(ai, {})
             sf = ov.get("start", a["start"])
             ef = ov.get("end", a["end"])
             total_off = self.scene_offset + self._get_effective_act_offset(ai)
+            act_tag = self._make_action_tag(a)
 
-            # Export points CSV once per action (named after first camera stem)
+            # Create action directory: 01-boss/
+            dir_name = self._build_export_dir_name(seq, self.cur_scene)
+            act_dir = os.path.join(out_dir, dir_name)
+            os.makedirs(act_dir, exist_ok=True)
+
+            # --- Save offsets.json ---
+            import json as _json
+            offset_info = {
+                "scene": self.cur_scene,
+                "scene_offset": self.scene_offset,
+                "action": a["action"],
+                "variant": a.get("variant", ""),
+                "rep": rep,
+                "start_frame": sf,
+                "end_frame": ef,
+                "effective_offset": total_off,
+            }
+            with open(os.path.join(act_dir, "offsets.json"), "w") as f:
+                _json.dump(offset_info, f, indent=2, ensure_ascii=False)
+
+            # --- Copy calibration files ---
+            if self.calibs:
+                cal_dst = os.path.join(act_dir, "calibration")
+                os.makedirs(cal_dst, exist_ok=True)
+                # Find and copy original calibration files
+                cal_folder = getattr(self, "cal_folder", None)
+                if cal_folder and os.path.isdir(cal_folder):
+                    import shutil
+                    for fn in os.listdir(cal_folder):
+                        if fn.lower().endswith(".json"):
+                            src = os.path.join(cal_folder, fn)
+                            shutil.copy2(src, os.path.join(cal_dst, fn))
+
+            # --- Export 3D points CSV ---
             if self.pts3d is not None:
-                first_stem = cam_items[0][1]
                 pi_s = v2p(sf, self.vfps, self.pfps, self.pts3d.shape[0], total_off)
                 pi_e = v2p(ef, self.vfps, self.pfps, self.pts3d.shape[0], total_off)
                 sl = self.pts3d[pi_s:pi_e + 1]
@@ -967,14 +1013,17 @@ class ClipAnnotator(QMainWindow):
                 cols = []
                 for j in range(nj):
                     cols.extend([f"{j}_x", f"{j}_y", f"{j}_z"])
+                csv_name = f"{act_tag}-rep{rep}.csv"
                 pd.DataFrame(sl.reshape(sl.shape[0], -1), columns=cols).to_csv(
-                    os.path.join(out_dir, f"{first_stem}.csv"), index=False)
+                    os.path.join(act_dir, csv_name), index=False)
 
-            # Export video per camera
-            for ci, stem, cn in cam_items:
+            # --- Export video per camera ---
+            for cn in export_cams:
                 if prog.wasCanceled(): break
+                stem = self._build_export_stem(cn, a, rep)
+
                 if cn == "virtual":
-                    self._export_virtual_flat(out_dir, stem, sf, ef, total_off)
+                    self._export_virtual_to(act_dir, stem, sf, ef, total_off)
                     op += 1; prog.setValue(op); continue
 
                 vpath = None
@@ -990,7 +1039,7 @@ class ClipAnnotator(QMainWindow):
                 fps = cap2.get(cv2.CAP_PROP_FPS) or 30.0
                 w = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
                 h = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                out_path = os.path.join(out_dir, f"{stem}.mp4")
+                out_path = os.path.join(act_dir, f"{stem}.mp4")
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                 writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
                 ie = self.calibs.get(cn)
@@ -1018,14 +1067,15 @@ class ClipAnnotator(QMainWindow):
                 writer.release(); cap2.release()
                 op += 1; prog.setValue(op)
                 QCoreApplication.processEvents()
+            seq += 1
         prog.close()
-        QMessageBox.information(self, "Done", f"Exported {total_ops} files to:\n{out_dir}")
+        QMessageBox.information(self, "Done", f"Exported {len(indices)} actions to:\n{out_dir}")
 
-    def _export_virtual_flat(self, out_dir, stem, sf, ef, total_off):
-        """Export a virtual (black background + skeleton) video clip to flat file."""
+    def _export_virtual_to(self, act_dir, stem, sf, ef, total_off):
+        """Export a virtual (black background + skeleton) video clip."""
         w, h = 1280, 720
         fps = self.vfps or 30.0
-        out_path = os.path.join(out_dir, f"{stem}.mp4")
+        out_path = os.path.join(act_dir, f"{stem}.mp4")
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
         for fi in range(sf, ef + 1):
