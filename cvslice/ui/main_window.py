@@ -839,6 +839,34 @@ class ClipAnnotator(QMainWindow):
     # =======================================================================
     #  Export
     # =======================================================================
+
+    def _build_export_name(self, seq: int, scene: str, cam: str,
+                           action_dict: dict) -> str:
+        """Build the export filename stem: 01-boss-topcenter-walk-rep1."""
+        scene_s = scene.lower().replace(" ", "_").replace("/", "_") if scene else "unknown"
+        cam_s = cam.lower().replace(" ", "_")
+        act_s = action_dict["action"].lower().replace(" ", "_").replace("/", "_")
+        if action_dict.get("variant"):
+            act_s += f"-{action_dict['variant'].lower().replace(' ', '_')}"
+        rep = action_dict.get("rep", "rep1")
+        if not rep:
+            rep = "rep1"
+        return f"{seq:02d}-{scene_s}-{cam_s}-{act_s}-{rep}"
+
+    def _preview_export_names(self, indices: list[int],
+                              export_cams: list[str],
+                              start_seq: int) -> list[tuple[int, int, str, str]]:
+        """Generate (action_idx, cam_idx, stem, cam_name) for all export items."""
+        items = []
+        seq = start_seq
+        for ai in indices:
+            a = self.actions[ai]
+            for ci, cn in enumerate(export_cams):
+                stem = self._build_export_name(seq, self.cur_scene, cn, a)
+                items.append((ai, ci, stem, cn))
+            seq += 1
+        return items
+
     def _export(self, all_actions, single_cam=False):
         if not self.actions:
             QMessageBox.warning(self, "Warning", "No actions loaded."); return
@@ -858,24 +886,80 @@ class ClipAnnotator(QMainWindow):
             export_cams = [self.active_cam]
         else:
             export_cams = self.avail_cams if self.avail_cams else ["virtual"]
-        total_ops = len(indices) * len(export_cams)
+
+        # --- Preview dialog with editable starting sequence number ---
+        preview = self._preview_export_names(indices, export_cams, 1)
+        # Build a sample text showing all filenames
+        sample_lines = []
+        for ai, ci, stem, cn in preview:
+            sample_lines.append(f"  {stem}.mp4")
+            if ci == 0 and self.pts3d is not None:
+                sample_lines.append(f"  {stem}.csv  (3D points)")
+        preview_text = "\n".join(sample_lines)
+
+        from PyQt5.QtWidgets import QDialog, QDialogButtonBox, QTextEdit
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Export Preview")
+        dlg.setMinimumSize(600, 400)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("Export filenames preview — edit starting sequence:"))
+        seq_row = QHBoxLayout()
+        seq_row.addWidget(QLabel("Starting sequence number:"))
+        seq_spin = QSpinBox()
+        seq_spin.setRange(0, 999)
+        seq_spin.setValue(1)
+        seq_row.addWidget(seq_spin)
+        seq_row.addStretch()
+        lay.addLayout(seq_row)
+        te = QTextEdit()
+        te.setReadOnly(True)
+        te.setPlainText(preview_text)
+        te.setFont(te.document().defaultFont())
+        lay.addWidget(te)
+
+        def _refresh_preview():
+            new_preview = self._preview_export_names(
+                indices, export_cams, seq_spin.value())
+            lines = []
+            for ai2, ci2, stem2, cn2 in new_preview:
+                lines.append(f"  {stem2}.mp4")
+                if ci2 == 0 and self.pts3d is not None:
+                    lines.append(f"  {stem2}.csv  (3D points)")
+            te.setPlainText("\n".join(lines))
+
+        seq_spin.valueChanged.connect(_refresh_preview)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+
+        if dlg.exec_() != QDialog.Accepted:
+            return
+
+        start_seq = seq_spin.value()
+        final_items = self._preview_export_names(indices, export_cams, start_seq)
+
+        # Group by action index for shared CSV export
+        from collections import defaultdict
+        action_items = defaultdict(list)  # ai -> [(ci, stem, cn), ...]
+        for ai, ci, stem, cn in final_items:
+            action_items[ai].append((ci, stem, cn))
+
+        total_ops = len(final_items)
         prog = QProgressDialog("Exporting...", "Cancel", 0, total_ops, self)
         prog.setWindowModality(Qt.WindowModal); prog.setMinimumDuration(0)
         op = 0
-        for ai in indices:
+
+        for ai, cam_items in action_items.items():
             a = self.actions[ai]
             ov = self.overrides.get(ai, {})
             sf = ov.get("start", a["start"])
             ef = ov.get("end", a["end"])
             total_off = self.scene_offset + self._get_effective_act_offset(ai)
-            safe = f"{ai:03d}_{a['action']}"
-            if a.get("variant"): safe += f"_{a['variant']}"
-            if a.get("rep"): safe += f"_{a['rep']}"
-            safe = safe.replace(" ", "_").replace("/", "_")
-            act_dir = os.path.join(out_dir, safe)
-            os.makedirs(act_dir, exist_ok=True)
-            # points csv
+
+            # Export points CSV once per action (named after first camera stem)
             if self.pts3d is not None:
+                first_stem = cam_items[0][1]
                 pi_s = v2p(sf, self.vfps, self.pfps, self.pts3d.shape[0], total_off)
                 pi_e = v2p(ef, self.vfps, self.pfps, self.pts3d.shape[0], total_off)
                 sl = self.pts3d[pi_s:pi_e + 1]
@@ -884,12 +968,13 @@ class ClipAnnotator(QMainWindow):
                 for j in range(nj):
                     cols.extend([f"{j}_x", f"{j}_y", f"{j}_z"])
                 pd.DataFrame(sl.reshape(sl.shape[0], -1), columns=cols).to_csv(
-                    os.path.join(act_dir, "points3d.csv"), index=False)
-            # video per camera
-            for cn in export_cams:
+                    os.path.join(out_dir, f"{first_stem}.csv"), index=False)
+
+            # Export video per camera
+            for ci, stem, cn in cam_items:
                 if prog.wasCanceled(): break
                 if cn == "virtual":
-                    self._export_virtual(act_dir, sf, ef, total_off)
+                    self._export_virtual_flat(out_dir, stem, sf, ef, total_off)
                     op += 1; prog.setValue(op); continue
 
                 vpath = None
@@ -905,7 +990,7 @@ class ClipAnnotator(QMainWindow):
                 fps = cap2.get(cv2.CAP_PROP_FPS) or 30.0
                 w = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
                 h = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                out_path = os.path.join(act_dir, f"{cn}.mp4")
+                out_path = os.path.join(out_dir, f"{stem}.mp4")
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                 writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
                 ie = self.calibs.get(cn)
@@ -922,7 +1007,10 @@ class ClipAnnotator(QMainWindow):
                             proj = project_pts(pts, intr, extr,
                                                self.flip[0], self.flip[1], self.flip[2])
                             if proj is not None and self.show_skel:
-                                draw_skel(frm, proj)
+                                nan_mask = None
+                                if self.pts3d_was_nan is not None:
+                                    nan_mask = self.pts3d_was_nan[pidx]
+                                draw_skel_with_confidence(frm, proj, nan_mask)
                     t = fi / fps
                     cv2.putText(frm, f"{fmt_time(t)} F:{fi}", (15, 35),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
@@ -931,13 +1019,13 @@ class ClipAnnotator(QMainWindow):
                 op += 1; prog.setValue(op)
                 QCoreApplication.processEvents()
         prog.close()
-        QMessageBox.information(self, "Done", f"Exported to {out_dir}")
+        QMessageBox.information(self, "Done", f"Exported {total_ops} files to:\n{out_dir}")
 
-    def _export_virtual(self, act_dir, sf, ef, total_off):
-        """Export a virtual (black background + skeleton) video clip."""
+    def _export_virtual_flat(self, out_dir, stem, sf, ef, total_off):
+        """Export a virtual (black background + skeleton) video clip to flat file."""
         w, h = 1280, 720
         fps = self.vfps or 30.0
-        out_path = os.path.join(act_dir, "virtual.mp4")
+        out_path = os.path.join(out_dir, f"{stem}.mp4")
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
         for fi in range(sf, ef + 1):
@@ -951,7 +1039,10 @@ class ClipAnnotator(QMainWindow):
                         proj = project_pts(pts, intr, extr,
                                            self.flip[0], self.flip[1], self.flip[2])
                         if proj is not None and self.show_skel:
-                            draw_skel(frm, proj)
+                            nan_mask = None
+                            if self.pts3d_was_nan is not None:
+                                nan_mask = self.pts3d_was_nan[pidx]
+                            draw_skel_with_confidence(frm, proj, nan_mask)
                     break
             t = fi / fps
             cv2.putText(frm, f"{fmt_time(t)} F:{fi}", (15, 35),
