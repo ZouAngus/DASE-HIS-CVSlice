@@ -4,5 +4,6 @@ from .interpolation import interpolate_joints
 from .adjustment import (
     unproject_2d_to_3d, get_camera_depth, extract_R_t,
     find_nearest_joint, PICK_RADIUS,
+    compute_ray, triangulate_two_rays,
 )
 from .propagation import AnchorSet, interpolate_anchors, apply_bulk_offset

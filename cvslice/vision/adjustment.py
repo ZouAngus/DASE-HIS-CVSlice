@@ -61,6 +61,51 @@ def extract_R_t(extr: dict) -> tuple[np.ndarray, np.ndarray] | None:
     return R, t
 
 
+def compute_ray(u: float, v: float,
+                K: np.ndarray, R: np.ndarray, t: np.ndarray
+                ) -> tuple[np.ndarray, np.ndarray]:
+    """Compute a 3D ray from a 2D pixel coordinate.
+
+    Returns:
+        origin: (3,) camera center in world coordinates.
+        direction: (3,) unit direction vector in world coordinates.
+    """
+    K_inv = np.linalg.inv(K)
+    # Camera center in world coords: C = -R^T @ t
+    origin = -R.T @ t
+    # Direction: R^T @ K^{-1} @ [u, v, 1]
+    d_cam = K_inv @ np.array([u, v, 1.0])
+    d_world = R.T @ d_cam
+    d_world = d_world / np.linalg.norm(d_world)
+    return origin, d_world
+
+
+def triangulate_two_rays(o1: np.ndarray, d1: np.ndarray,
+                         o2: np.ndarray, d2: np.ndarray) -> np.ndarray:
+    """Find the midpoint of the closest approach of two 3D rays.
+
+    Each ray: P = o + t*d.  Returns the 3D point that best satisfies both.
+    """
+    # Solve for t1, t2 that minimize |o1 + t1*d1 - o2 - t2*d2|
+    w0 = o1 - o2
+    a = float(d1 @ d1)  # always 1 if normalized, but be safe
+    b = float(d1 @ d2)
+    c = float(d2 @ d2)
+    d = float(d1 @ w0)
+    e = float(d2 @ w0)
+    denom = a * c - b * b
+    if abs(denom) < 1e-12:
+        # Rays are parallel — fall back to midpoint at closest approach
+        t1 = 0.0
+        t2 = e / c if abs(c) > 1e-12 else 0.0
+    else:
+        t1 = (b * e - c * d) / denom
+        t2 = (a * e - b * d) / denom
+    p1 = o1 + t1 * d1
+    p2 = o2 + t2 * d2
+    return 0.5 * (p1 + p2)
+
+
 # Joint selection radius in pixels
 PICK_RADIUS = 15
 

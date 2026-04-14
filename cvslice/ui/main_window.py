@@ -25,6 +25,7 @@ from ..vision import (
     project_pts, draw_skel, draw_skel_with_confidence, clear_projection_cache,
     unproject_2d_to_3d, get_camera_depth, extract_R_t, find_nearest_joint,
     AnchorSet, interpolate_anchors, apply_bulk_offset,
+    compute_ray, triangulate_two_rays,
 )
 from .video_label import VideoLabel
 
@@ -84,6 +85,9 @@ class ClipAnnotator(QMainWindow):
         self._selected_joint: int | None = None  # joint selected for propagation
         self._last_drag_delta: np.ndarray | None = None  # delta from last drag
         self._last_drag_joint: int | None = None  # joint of last drag
+
+        # Two-view triangulation state
+        self._pending_ray: dict | None = None  # {joint, pidx, cam, origin, direction, old_xyz}
 
         self._build_ui()
         self.timer = QTimer()
@@ -220,6 +224,20 @@ class ClipAnnotator(QMainWindow):
             "Edits modify the 3D points in memory.\n"
             "Use Ctrl+Z to undo, File > Save Edited 3D Points to export.")
         ff.addRow(self.edit_cb)
+        self.tri_cb = QCheckBox("Triangulate (2-view)")
+        self.tri_cb.setChecked(False)
+        self.tri_cb.setToolTip(
+            "Two-view triangulation for accurate 3D editing:\n"
+            "1. Drag joint to desired 2D position in camera A\n"
+            "2. Switch to camera B, drag same joint again\n"
+            "3. The true 3D position is computed from both views\n\n"
+            "This corrects depth (Z) which single-view drag cannot.")
+        self.tri_cb.stateChanged.connect(self._on_tri_toggled)
+        ff.addRow(self.tri_cb)
+        self.tri_status_lbl = QLabel("")
+        self.tri_status_lbl.setStyleSheet("font-size:11px; color:#888;")
+        self.tri_status_lbl.setWordWrap(True)
+        ff.addRow(self.tri_status_lbl)
         for axis, idx in [("Flip X", 0), ("Flip Y", 1), ("Flip Z", 2)]:
             cb = QCheckBox(axis)
             cb.stateChanged.connect(lambda s, i=idx: self._set_flip(i, s == Qt.Checked))
@@ -319,6 +337,11 @@ class ClipAnnotator(QMainWindow):
     def _set_flip(self, idx, val):
         self.flip[idx] = val; self._show_frame()
 
+    def _on_tri_toggled(self, state):
+        if state != Qt.Checked:
+            self._pending_ray = None
+            self.tri_status_lbl.setText("")
+
     # =======================================================================
     #  File loaders
     # =======================================================================
@@ -389,6 +412,7 @@ class ClipAnnotator(QMainWindow):
         self._anchors.clear_all()
         self._last_drag_delta = None
         self._last_drag_joint = None
+        self._pending_ray = None
 
         if self.data_root:
             csv_path, subfolder = find_csv_for_scene(self.data_root, scene_name)
@@ -887,15 +911,91 @@ class ClipAnnotator(QMainWindow):
         if self._drag_joint is None:
             return
         if self._drag_pidx is not None and self.pts3d is not None:
+            joint = self._drag_joint
+            pidx = self._drag_pidx
+            new_xyz = self.pts3d[pidx, joint].copy()
+
             # Compute and store delta for bulk offset
             if self._undo_stack:
-                _, _, old_xyz = self._undo_stack[-1]
-                new_xyz = self.pts3d[self._drag_pidx, self._drag_joint]
-                self._last_drag_delta = new_xyz - old_xyz
-                self._last_drag_joint = self._drag_joint
+                last_entry = self._undo_stack[-1]
+                if last_entry[0] != 'range':
+                    old_xyz = last_entry[2]
+                    self._last_drag_delta = new_xyz - old_xyz
+                    self._last_drag_joint = joint
+
+            # --- Triangulation mode ---
+            if self.tri_cb.isChecked() and self.edit_cb.isChecked():
+                cam = self.active_cam
+                if cam and cam in self.calibs:
+                    intr, extr = self.calibs[cam]
+                    Rt = extract_R_t(extr)
+                    if Rt is not None:
+                        R, t = Rt
+                        K = np.array(intr["camera_matrix"], dtype=np.float64)
+                        origin, direction = compute_ray(float(fx), float(fy), K, R, t)
+
+                        if (self._pending_ray is not None
+                                and self._pending_ray["joint"] == joint
+                                and self._pending_ray["pidx"] == pidx
+                                and self._pending_ray["cam"] != cam):
+                            # Second view — triangulate!
+                            r1 = self._pending_ray
+                            pt3d = triangulate_two_rays(
+                                r1["origin"], r1["direction"],
+                                origin, direction)
+
+                            # Apply flip inversion if needed
+                            if self.flip[0]: pt3d[0] *= -1
+                            if self.flip[1]: pt3d[1] *= -1
+                            if self.flip[2]: pt3d[2] *= -1
+
+                            # Revert the single-view edit, replace with triangulated
+                            self.pts3d[pidx, joint] = pt3d
+                            # Update undo: replace last entry's "new" with triangulated
+                            # (old_xyz from first ray is the true original)
+                            if self._undo_stack:
+                                self._undo_stack.pop()  # remove view-2 undo
+                            # Keep view-1 undo entry (has original old_xyz)
+                            # but update: the undo should restore to original
+                            # The first ray's undo entry already has the right old_xyz
+
+                            self._pending_ray = None
+                            self.tri_status_lbl.setText("")
+                            self._pts3d_dirty = True
+                            self.statusBar().showMessage(
+                                f"Triangulated joint {joint} at frame {pidx} "
+                                f"from {r1['cam']} + {cam}. Ctrl+Z to undo.")
+                            self._drag_joint = None
+                            self._show_frame()
+                            return
+                        else:
+                            # First view — record ray, revert 3D edit
+                            # Restore original position (don't apply single-view edit)
+                            if self._undo_stack:
+                                entry = self._undo_stack[-1]
+                                if entry[0] != 'range':
+                                    orig_xyz = entry[2]
+                                    self.pts3d[pidx, joint] = orig_xyz.copy()
+
+                            self._pending_ray = {
+                                "joint": joint, "pidx": pidx, "cam": cam,
+                                "origin": origin, "direction": direction,
+                                "old_xyz": self._undo_stack[-1][2].copy() if self._undo_stack else new_xyz,
+                            }
+                            self.tri_status_lbl.setText(
+                                f"✔ Ray 1: J{joint} @ {cam}\n"
+                                f"Switch camera, drag same joint")
+                            self.statusBar().showMessage(
+                                f"Ray 1 recorded for joint {joint} from {cam}. "
+                                f"Now switch to another camera and drag the same joint.")
+                            self._drag_joint = None
+                            self._show_frame()
+                            return
+
+            # --- Normal (single-view) mode ---
             self._pts3d_dirty = True
             self.statusBar().showMessage(
-                f"Joint {self._drag_joint} moved at pts3d frame {self._drag_pidx}. "
+                f"Joint {joint} moved at pts3d frame {pidx}. "
                 f"Ctrl+Z to undo. {len(self._undo_stack)} edits in stack.")
         self._drag_joint = None
         self._show_frame()
