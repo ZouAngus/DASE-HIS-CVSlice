@@ -24,6 +24,7 @@ from ..io import (
 from ..vision import (
     project_pts, draw_skel, draw_skel_with_confidence, clear_projection_cache,
     unproject_2d_to_3d, get_camera_depth, extract_R_t, find_nearest_joint,
+    AnchorSet, interpolate_anchors, apply_bulk_offset,
 )
 from .video_label import VideoLabel
 
@@ -77,6 +78,12 @@ class ClipAnnotator(QMainWindow):
         self._drag_proj = None      # current 2D projections (J, 2) for hit-testing
         self._drag_pidx = None      # pts3d frame index of the dragged frame
         self._undo_stack: list[tuple[int, int, np.ndarray]] = []  # (pidx, joint, old_xyz)
+
+        # Propagation state
+        self._anchors = AnchorSet()
+        self._selected_joint: int | None = None  # joint selected for propagation
+        self._last_drag_delta: np.ndarray | None = None  # delta from last drag
+        self._last_drag_joint: int | None = None  # joint of last drag
 
         self._build_ui()
         self.timer = QTimer()
@@ -170,7 +177,7 @@ class ClipAnnotator(QMainWindow):
         hl.addWidget(center, stretch=1)
 
         # ---- RIGHT panel ----
-        right = QWidget(); right.setFixedWidth(260)
+        right = QWidget(); right.setFixedWidth(280)
         rv = QVBoxLayout(right); rv.setContentsMargins(0, 0, 0, 0)
 
         cg = QGroupBox("Camera"); cf = QFormLayout(cg)
@@ -218,6 +225,92 @@ class ClipAnnotator(QMainWindow):
             cb.stateChanged.connect(lambda s, i=idx: self._set_flip(i, s == Qt.Checked))
             ff.addRow(cb)
         rv.addWidget(fg)
+
+        # ---- Propagation panel ----
+        pg = QGroupBox("Propagate Edits")
+        pfl = QVBoxLayout(pg)
+
+        # Joint selector
+        jrow = QHBoxLayout()
+        jrow.addWidget(QLabel("Joint:"))
+        self.joint_spin = QSpinBox()
+        self.joint_spin.setRange(0, 99)
+        self.joint_spin.setValue(0)
+        self.joint_spin.setToolTip("Joint index to propagate")
+        jrow.addWidget(self.joint_spin)
+        self.pick_joint_btn = QPushButton("Pick")
+        self.pick_joint_btn.setToolTip("Click a joint in the view to select it")
+        self.pick_joint_btn.setCheckable(True)
+        jrow.addWidget(self.pick_joint_btn)
+        pfl.addLayout(jrow)
+
+        # Anchor controls
+        arow = QHBoxLayout()
+        self.set_anchor_btn = QPushButton("Set Anchor")
+        self.set_anchor_btn.setToolTip(
+            "Mark current frame as anchor for the selected joint.\n"
+            "Drag the joint first, then click Set Anchor.")
+        self.set_anchor_btn.clicked.connect(self._set_anchor)
+        arow.addWidget(self.set_anchor_btn)
+        self.del_anchor_btn = QPushButton("Del Anchor")
+        self.del_anchor_btn.setToolTip("Remove anchor at current frame")
+        self.del_anchor_btn.clicked.connect(self._del_anchor)
+        arow.addWidget(self.del_anchor_btn)
+        pfl.addLayout(arow)
+
+        # Anchor list
+        self.anchor_list = QListWidget()
+        self.anchor_list.setMaximumHeight(100)
+        self.anchor_list.setToolTip("Anchors: joint@frame")
+        self.anchor_list.currentRowChanged.connect(self._on_anchor_selected)
+        pfl.addWidget(self.anchor_list)
+
+        # Range for interpolation
+        rform = QFormLayout()
+        self.prop_start_spin = QSpinBox()
+        self.prop_start_spin.setRange(0, 9999999)
+        rform.addRow("From:", self.prop_start_spin)
+        self.prop_end_spin = QSpinBox()
+        self.prop_end_spin.setRange(0, 9999999)
+        rform.addRow("To:", self.prop_end_spin)
+        pfl.addLayout(rform)
+
+        # Method selector
+        mrow = QHBoxLayout()
+        mrow.addWidget(QLabel("Method:"))
+        self.method_combo = QComboBox()
+        self.method_combo.addItems(["spline", "linear"])
+        mrow.addWidget(self.method_combo)
+        pfl.addLayout(mrow)
+
+        # Apply buttons
+        self.apply_interp_btn = QPushButton("Apply Interpolation")
+        self.apply_interp_btn.setToolTip(
+            "Interpolate between anchors across the frame range")
+        self.apply_interp_btn.clicked.connect(self._apply_interpolation)
+        pfl.addWidget(self.apply_interp_btn)
+
+        # Bulk offset
+        orow = QHBoxLayout()
+        orow.addWidget(QLabel("Taper:"))
+        self.taper_combo = QComboBox()
+        self.taper_combo.addItems(["none", "linear", "cosine"])
+        orow.addWidget(self.taper_combo)
+        pfl.addLayout(orow)
+        self.apply_offset_btn = QPushButton("Apply Last Drag as Offset")
+        self.apply_offset_btn.setToolTip(
+            "Take the delta from the last single-frame drag and apply it\n"
+            "across the frame range with optional tapering.")
+        self.apply_offset_btn.clicked.connect(self._apply_bulk_offset)
+        pfl.addWidget(self.apply_offset_btn)
+
+        # Clear
+        self.clear_anchors_btn = QPushButton("Clear All Anchors")
+        self.clear_anchors_btn.clicked.connect(self._clear_anchors)
+        pfl.addWidget(self.clear_anchors_btn)
+
+        rv.addWidget(pg)
+
         rv.addStretch()
         hl.addWidget(right)
         self.statusBar().showMessage(
@@ -293,6 +386,9 @@ class ClipAnnotator(QMainWindow):
         self.pts3d_valid = None
         self.pts3d_was_nan = None
         self.avail_cams = []
+        self._anchors.clear_all()
+        self._last_drag_delta = None
+        self._last_drag_joint = None
 
         if self.data_root:
             csv_path, subfolder = find_csv_for_scene(self.data_root, scene_name)
@@ -343,6 +439,7 @@ class ClipAnnotator(QMainWindow):
         self.lbl_scene_info.setText("  |  ".join(info_parts))
 
         self._refresh_act_list()
+        self._refresh_anchor_list()
         if self.cap:
             self.cap.release(); self.cap = None
         self._cached_frame_idx = -1
@@ -681,6 +778,14 @@ class ClipAnnotator(QMainWindow):
                     if self._drag_joint is not None and self._drag_joint < len(proj):
                         jx, jy = int(proj[self._drag_joint][0]), int(proj[self._drag_joint][1])
                         cv2.circle(frame, (jx, jy), 8, (0, 255, 0), 2)
+                    # Highlight anchor joints at this frame
+                    for aj in self._anchors.all_joints():
+                        if pidx in self._anchors.get_anchors(aj) and aj < len(proj):
+                            ax, ay = int(proj[aj][0]), int(proj[aj][1])
+                            cv2.circle(frame, (ax, ay), 10, (255, 0, 255), 2)  # magenta
+                            cv2.putText(frame, "A", (ax + 12, ay - 4),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                        (255, 0, 255), 1)
                     self._drag_proj = proj
                     self._drag_pidx = pidx
         # Update video label frame size for coordinate mapping
@@ -711,6 +816,16 @@ class ClipAnnotator(QMainWindow):
     # =======================================================================
     def _on_mouse_press(self, fx, fy):
         """Mouse pressed on video at frame coords (fx, fy)."""
+        # Pick mode: select joint for propagation panel
+        if self.pick_joint_btn.isChecked():
+            if self._drag_proj is not None:
+                joint = find_nearest_joint(fx, fy, self._drag_proj)
+                if joint is not None:
+                    self.joint_spin.setValue(joint)
+                    self.pick_joint_btn.setChecked(False)
+                    self.statusBar().showMessage(f"Selected joint {joint} for propagation")
+            return
+
         if not self.edit_cb.isChecked():
             return
         if self._drag_proj is None or self._drag_pidx is None:
@@ -768,13 +883,16 @@ class ClipAnnotator(QMainWindow):
         self._show_frame()
 
     def _on_mouse_release(self, fx, fy):
-        """Mouse released — finalize the drag and push to undo stack."""
+        """Mouse released — finalize the drag and record delta."""
         if self._drag_joint is None:
             return
         if self._drag_pidx is not None and self.pts3d is not None:
-            # The final position is already set by _on_mouse_move
-            # Push to undo stack (the old position was saved at press time... 
-            # but we need to save it BEFORE the drag started)
+            # Compute and store delta for bulk offset
+            if self._undo_stack:
+                _, _, old_xyz = self._undo_stack[-1]
+                new_xyz = self.pts3d[self._drag_pidx, self._drag_joint]
+                self._last_drag_delta = new_xyz - old_xyz
+                self._last_drag_joint = self._drag_joint
             self._pts3d_dirty = True
             self.statusBar().showMessage(
                 f"Joint {self._drag_joint} moved at pts3d frame {self._drag_pidx}. "
@@ -783,17 +901,29 @@ class ClipAnnotator(QMainWindow):
         self._show_frame()
 
     def _undo_joint_edit(self):
-        """Undo the last joint edit."""
+        """Undo the last joint edit (single point or range)."""
         if not self._undo_stack:
             self.statusBar().showMessage("Nothing to undo.")
             return
-        pidx, joint, old_xyz = self._undo_stack.pop()
-        if self.pts3d is not None and pidx < self.pts3d.shape[0]:
-            self.pts3d[pidx, joint] = old_xyz
-            self._show_frame()
-            self.statusBar().showMessage(
-                f"Undone: joint {joint} at frame {pidx} restored. "
-                f"{len(self._undo_stack)} edits remaining.")
+        entry = self._undo_stack.pop()
+        if entry[0] == 'range':
+            # Range undo: ('range', joint, fs, fe, old_data)
+            _, joint, fs, fe, old_data = entry
+            if self.pts3d is not None:
+                self.pts3d[fs:fe + 1, joint] = old_data
+                self._show_frame()
+                self.statusBar().showMessage(
+                    f"Undone: joint {joint} range [{fs}-{fe}] restored. "
+                    f"{len(self._undo_stack)} edits remaining.")
+        else:
+            # Single point undo: (pidx, joint, old_xyz)
+            pidx, joint, old_xyz = entry
+            if self.pts3d is not None and pidx < self.pts3d.shape[0]:
+                self.pts3d[pidx, joint] = old_xyz
+                self._show_frame()
+                self.statusBar().showMessage(
+                    f"Undone: joint {joint} at frame {pidx} restored. "
+                    f"{len(self._undo_stack)} edits remaining.")
 
     def _save_edited_csv(self):
         """Save the (possibly edited) 3D points to a new CSV file."""
@@ -812,6 +942,149 @@ class ClipAnnotator(QMainWindow):
         pd.DataFrame(flat, columns=cols).to_csv(path, index=False)
         self._pts3d_dirty = False
         QMessageBox.information(self, "Saved", f"3D points saved to:\n{path}")
+
+    # =======================================================================
+    #  Propagation (multi-frame editing)
+    # =======================================================================
+    def _refresh_anchor_list(self):
+        """Refresh the anchor list widget."""
+        self.anchor_list.clear()
+        for joint, frame, xyz in self._anchors.summary():
+            self.anchor_list.addItem(
+                f"J{joint} @ F{frame}  ({xyz[0]:.1f}, {xyz[1]:.1f}, {xyz[2]:.1f})")
+
+    def _set_anchor(self):
+        """Set an anchor at the current frame for the selected joint."""
+        if self.pts3d is None:
+            QMessageBox.warning(self, "Warning", "No 3D data loaded."); return
+        if self._drag_pidx is None:
+            # Compute pidx from current frame
+            total_off = self.scene_offset + self._get_effective_act_offset(self.cur_act)
+            pidx = v2p(self.cur_frame, self.vfps, self.pfps,
+                       self.pts3d.shape[0], total_off)
+        else:
+            pidx = self._drag_pidx
+        joint = self.joint_spin.value()
+        if joint >= self.pts3d.shape[1]:
+            QMessageBox.warning(self, "Warning",
+                                f"Joint {joint} out of range (max {self.pts3d.shape[1]-1}).")
+            return
+        xyz = self.pts3d[pidx, joint].copy()
+        self._anchors.set_anchor(joint, pidx, xyz)
+        self._refresh_anchor_list()
+        # Auto-update range to cover all anchors for this joint
+        anchors = self._anchors.get_anchors(joint)
+        if anchors:
+            frames = sorted(anchors.keys())
+            self.prop_start_spin.setValue(max(0, frames[0]))
+            self.prop_end_spin.setValue(min(self.pts3d.shape[0] - 1, frames[-1]))
+        self.statusBar().showMessage(
+            f"Anchor set: joint {joint} at pts3d frame {pidx}")
+        self._show_frame()
+
+    def _del_anchor(self):
+        """Remove anchor at current frame for selected joint."""
+        if self.pts3d is None: return
+        total_off = self.scene_offset + self._get_effective_act_offset(self.cur_act)
+        pidx = v2p(self.cur_frame, self.vfps, self.pfps,
+                   self.pts3d.shape[0], total_off)
+        joint = self.joint_spin.value()
+        self._anchors.remove_anchor(joint, pidx)
+        self._refresh_anchor_list()
+        self.statusBar().showMessage(
+            f"Anchor removed: joint {joint} at frame {pidx}")
+
+    def _on_anchor_selected(self, row):
+        """Jump to the frame of the selected anchor."""
+        summary = self._anchors.summary()
+        if row < 0 or row >= len(summary): return
+        joint, frame, _ = summary[row]
+        self.joint_spin.setValue(joint)
+        # Convert pts3d frame back to video frame (approximate inverse of v2p)
+        if self.pts3d is not None and self.pfps > 0 and self.vfps > 0:
+            total_off = self.scene_offset + self._get_effective_act_offset(self.cur_act)
+            vframe = int(round(frame * (self.vfps / self.pfps) - total_off))
+            vframe = max(self.clip_start, min(self.clip_end, vframe))
+            self.cur_frame = vframe
+            self._read_frame(vframe)
+            self.slider.setValue(vframe)
+
+    def _apply_interpolation(self):
+        """Apply anchor-based interpolation across the frame range."""
+        if self.pts3d is None:
+            QMessageBox.warning(self, "Warning", "No 3D data loaded."); return
+        joint = self.joint_spin.value()
+        anchors = self._anchors.get_anchors(joint)
+        if not anchors:
+            QMessageBox.warning(self, "Warning",
+                                f"No anchors set for joint {joint}.\n"
+                                "Drag the joint to the desired position, then click Set Anchor.")
+            return
+        fs = self.prop_start_spin.value()
+        fe = self.prop_end_spin.value()
+        if fs >= fe:
+            QMessageBox.warning(self, "Warning", "Start frame must be < end frame."); return
+        method = self.method_combo.currentText()
+
+        # Save undo for the entire range
+        old_data = self.pts3d[fs:fe + 1, joint].copy()
+        self._undo_stack.append(('range', joint, fs, fe, old_data))
+
+        new_positions = interpolate_anchors(
+            self.pts3d, joint, anchors, fs, fe, method=method)
+        self.pts3d[fs:fe + 1, joint] = new_positions
+        self._pts3d_dirty = True
+        n_frames = fe - fs + 1
+        self.statusBar().showMessage(
+            f"Interpolated joint {joint} across {n_frames} frames "
+            f"({len(anchors)} anchors, {method}). Ctrl+Z to undo.")
+        self._show_frame()
+
+    def _apply_bulk_offset(self):
+        """Apply the last drag delta across the frame range."""
+        if self.pts3d is None:
+            QMessageBox.warning(self, "Warning", "No 3D data loaded."); return
+        if self._last_drag_delta is None:
+            QMessageBox.warning(self, "Warning",
+                                "No drag recorded yet.\n"
+                                "Drag a joint first, then use this button.")
+            return
+        joint = self.joint_spin.value()
+        if self._last_drag_joint is not None and joint != self._last_drag_joint:
+            reply = QMessageBox.question(
+                self, "Joint Mismatch",
+                f"Last drag was on joint {self._last_drag_joint}, "
+                f"but propagation target is joint {joint}.\n"
+                "Apply anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+        fs = self.prop_start_spin.value()
+        fe = self.prop_end_spin.value()
+        if fs >= fe:
+            QMessageBox.warning(self, "Warning", "Start frame must be < end frame."); return
+        taper = self.taper_combo.currentText()
+
+        # Save undo
+        old_data = self.pts3d[fs:fe + 1, joint].copy()
+        self._undo_stack.append(('range', joint, fs, fe, old_data))
+
+        new_positions = apply_bulk_offset(
+            self.pts3d, joint, fs, fe, self._last_drag_delta, taper=taper)
+        self.pts3d[fs:fe + 1, joint] = new_positions
+        self._pts3d_dirty = True
+        n_frames = fe - fs + 1
+        d = self._last_drag_delta
+        self.statusBar().showMessage(
+            f"Offset applied to joint {joint} across {n_frames} frames "
+            f"(delta=[{d[0]:.1f},{d[1]:.1f},{d[2]:.1f}], taper={taper}). Ctrl+Z to undo.")
+        self._show_frame()
+
+    def _clear_anchors(self):
+        """Clear all anchors."""
+        self._anchors.clear_all()
+        self._refresh_anchor_list()
+        self.statusBar().showMessage("All anchors cleared.")
 
     # =======================================================================
     #  Keyboard
