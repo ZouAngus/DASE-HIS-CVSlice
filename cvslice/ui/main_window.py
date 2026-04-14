@@ -88,7 +88,8 @@ class ClipAnnotator(QMainWindow):
         self._last_drag_joint: int | None = None  # joint of last drag
 
         # Two-view triangulation state
-        self._pending_ray: dict | None = None  # {joint, pidx, cam, origin, direction, old_xyz}
+        # _pending_rays: {joint_idx: {vframe, cam, origin, direction, old_xyz, pidx_a}}
+        self._pending_rays: dict[int, dict] = {}
 
         # Per-camera view offset: {scene_name: {cam_name: int}}
         self._view_offsets: dict[str, dict[str, int]] = {}
@@ -399,8 +400,23 @@ class ClipAnnotator(QMainWindow):
 
     def _on_tri_toggled(self, state):
         if state != Qt.Checked:
-            self._pending_ray = None
+            self._pending_rays.clear()
             self.tri_status_lbl.setText("")
+
+    def _update_tri_status(self):
+        """Update the triangulation status label with all pending rays."""
+        if not self._pending_rays:
+            self.tri_status_lbl.setText("")
+            return
+        cam = None
+        parts = []
+        for j, info in sorted(self._pending_rays.items()):
+            cam = info["cam"]
+            parts.append(f"J{j}")
+        joints_str = ", ".join(parts)
+        self.tri_status_lbl.setText(
+            f"\u2714 Ray 1: {joints_str} @ {cam}\n"
+            f"\u5207\u6362\u76f8\u673a\uff0c\u62d6\u62fd\u540c\u4e00\u5173\u8282\u5b8c\u6210\u4e09\u89d2\u5316")
 
     def _show_editing_help(self):
         """Show a dialog with editing instructions."""
@@ -422,8 +438,10 @@ class ClipAnnotator(QMainWindow):
             "<h3>双视角三角化（修正深度）</h3>"
             "<ol>"
             "<li>勾选 <b>Edit Mode</b> + <b>Triangulate (2-view)</b></li>"
-            "<li>在相机 A 拖拽关节到正确的 2D 位置 → 记录射线 1（青色 T1 标记）</li>"
+            "<li>在相机 A 拖拽一个或多个关节到正确的 2D 位置 → 记录射线（青色 T1 标记）</li>"
             "<li>切换到相机 B，拖拽同一关节 → 自动三角化得到精确 3D</li>"
+            "<li>支持批量：在相机 A 拖拽多个关节，切换到 B 后逐个拖拽完成三角化</li>"
+            "<li>不同视角的 View offset 会自动处理帧对齐</li>"
             "<li>提示：选择夹角大的两个相机效果最好</li>"
             "</ol>"
             "<h3>锚点插值（修正连续偏移）</h3>"
@@ -520,7 +538,7 @@ class ClipAnnotator(QMainWindow):
         self._anchors.clear_all()
         self._last_drag_delta = None
         self._last_drag_joint = None
-        self._pending_ray = None
+        self._pending_rays.clear()
         self._kf_a = None
         self._kf_b = None
 
@@ -955,16 +973,14 @@ class ClipAnnotator(QMainWindow):
                     if self._drag_joint is not None and self._drag_joint < len(proj):
                         jx, jy = int(proj[self._drag_joint][0]), int(proj[self._drag_joint][1])
                         cv2.circle(frame, (jx, jy), 8, (0, 255, 0), 2)
-                    # Highlight pending triangulation joint (cyan + "T1")
-                    if (self._pending_ray is not None
-                            and self._pending_ray["pidx"] == pidx
-                            and self._pending_ray["joint"] < len(proj)):
-                        tj = self._pending_ray["joint"]
-                        tx, ty = int(proj[tj][0]), int(proj[tj][1])
-                        cv2.circle(frame, (tx, ty), 12, (255, 255, 0), 2)  # cyan in BGR
-                        cv2.putText(frame, "T1", (tx + 14, ty - 6),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                                    (255, 255, 0), 2)
+                    # Highlight pending triangulation joints (cyan + "T1")
+                    for tj, ray_info in self._pending_rays.items():
+                        if ray_info["vframe"] == self.cur_frame and tj < len(proj):
+                            tx, ty = int(proj[tj][0]), int(proj[tj][1])
+                            cv2.circle(frame, (tx, ty), 12, (255, 255, 0), 2)  # cyan in BGR
+                            cv2.putText(frame, "T1", (tx + 14, ty - 6),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                        (255, 255, 0), 2)
                     # Highlight anchor joints at this frame
                     for aj in self._anchors.all_joints():
                         if pidx in self._anchors.get_anchors(aj) and aj < len(proj):
@@ -1089,61 +1105,69 @@ class ClipAnnotator(QMainWindow):
                         R, t = Rt
                         K = np.array(intr["camera_matrix"], dtype=np.float64)
                         origin, direction = compute_ray(float(fx), float(fy), K, R, t)
+                        vframe = self.cur_frame  # use video frame for cross-camera matching
 
-                        if (self._pending_ray is not None
-                                and self._pending_ray["joint"] == joint
-                                and self._pending_ray["pidx"] == pidx
-                                and self._pending_ray["cam"] != cam):
-                            # Second view — triangulate!
-                            r1 = self._pending_ray
+                        if (joint in self._pending_rays
+                                and self._pending_rays[joint]["vframe"] == vframe
+                                and self._pending_rays[joint]["cam"] != cam):
+                            # Second view — triangulate this joint!
+                            r1 = self._pending_rays[joint]
                             pt3d = triangulate_two_rays(
                                 r1["origin"], r1["direction"],
                                 origin, direction)
 
-                            # Apply flip inversion if needed
+                            # Un-flip: rays were computed in flipped space
                             if self.flip[0]: pt3d[0] *= -1
                             if self.flip[1]: pt3d[1] *= -1
                             if self.flip[2]: pt3d[2] *= -1
 
-                            # Revert the single-view edit, replace with triangulated
-                            self.pts3d[pidx, joint] = pt3d
-                            # Update undo: replace last entry's "new" with triangulated
-                            # (old_xyz from first ray is the true original)
+                            # Write triangulated result to BOTH pidx_a and pidx_b
+                            # (they may differ due to view offset)
+                            pidx_a = r1["pidx_a"]
+                            pidx_b = pidx  # current camera's pidx
+                            self.pts3d[pidx_b, joint] = pt3d
+                            if pidx_a != pidx_b:
+                                self.pts3d[pidx_a, joint] = pt3d
+
+                            # Undo: remove view-2 entry, keep view-1 (has original old_xyz)
                             if self._undo_stack:
                                 self._undo_stack.pop()  # remove view-2 undo
-                            # Keep view-1 undo entry (has original old_xyz)
-                            # but update: the undo should restore to original
-                            # The first ray's undo entry already has the right old_xyz
 
-                            self._pending_ray = None
-                            self.tri_status_lbl.setText("")
+                            del self._pending_rays[joint]
                             self._pts3d_dirty = True
-                            self.statusBar().showMessage(
-                                f"Triangulated joint {joint} at frame {pidx} "
-                                f"from {r1['cam']} + {cam}. Ctrl+Z to undo.")
+                            remaining = len(self._pending_rays)
+                            if remaining == 0:
+                                self.tri_status_lbl.setText("")
+                                self.statusBar().showMessage(
+                                    f"Triangulated J{joint} from {r1['cam']}+{cam}. "
+                                    f"All done! Ctrl+Z to undo.")
+                            else:
+                                self._update_tri_status()
+                                self.statusBar().showMessage(
+                                    f"Triangulated J{joint} from {r1['cam']}+{cam}. "
+                                    f"{remaining} joints remaining.")
                             self._drag_joint = None
                             self._show_frame()
                             return
                         else:
                             # First view — record ray, revert 3D edit
-                            # Restore original position (don't apply single-view edit)
                             if self._undo_stack:
                                 entry = self._undo_stack[-1]
                                 if entry[0] != 'range':
                                     orig_xyz = entry[2]
                                     self.pts3d[pidx, joint] = orig_xyz.copy()
 
-                            self._pending_ray = {
-                                "joint": joint, "pidx": pidx, "cam": cam,
+                            self._pending_rays[joint] = {
+                                "vframe": vframe, "cam": cam,
                                 "origin": origin, "direction": direction,
                                 "old_xyz": self._undo_stack[-1][2].copy() if self._undo_stack else new_xyz,
+                                "pidx_a": pidx,
                             }
-                            self.tri_status_lbl.setText(
-                                f"✔ Ray 1: J{joint} @ {cam}\n"
-                                f"Switch camera, drag same joint")
+                            self._update_tri_status()
+                            n = len(self._pending_rays)
                             self.statusBar().showMessage(
-                                f"Ray 1 recorded for joint {joint} from {cam}. "
-                                f"Now switch to another camera and drag the same joint.")
+                                f"Ray 1 recorded: J{joint} @ {cam}. "
+                                f"{n} joint(s) pending. Switch camera & drag to triangulate.")
                             self._drag_joint = None
                             self._show_frame()
                             return
