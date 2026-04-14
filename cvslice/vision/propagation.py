@@ -177,3 +177,82 @@ def apply_bulk_offset(pts3d: np.ndarray, joint: int,
         weights = np.ones(n)
 
     return original + delta[None, :] * weights[:, None]
+
+
+def interpolate_all_joints(pts3d: np.ndarray,
+                           frame_a: int, frame_b: int,
+                           method: str = "spline") -> np.ndarray:
+    """Interpolate ALL joints between two keyframes.
+
+    Treats frame_a and frame_b as anchors (their current positions are correct),
+    and smoothly interpolates every joint for all frames in between.
+
+    Args:
+        pts3d: (T, J, 3) full point array (read-only).
+        frame_a: First keyframe (inclusive, treated as anchor).
+        frame_b: Second keyframe (inclusive, treated as anchor).
+        method: "spline" or "linear".
+
+    Returns:
+        (N, J, 3) interpolated positions for frames [frame_a..frame_b].
+    """
+    T, J, _ = pts3d.shape
+    fa, fb = max(0, min(frame_a, frame_b)), min(T - 1, max(frame_a, frame_b))
+    n = fb - fa + 1
+    result = pts3d[fa:fb + 1].copy()
+    if n <= 2:
+        return result
+
+    target = np.arange(fa, fb + 1)
+    knot_f = np.array([fa, fb], dtype=float)
+
+    for j in range(J):
+        knot_v = np.array([pts3d[fa, j], pts3d[fb, j]])  # (2, 3)
+        if method == "spline" and HAS_SCIPY:
+            for d in range(3):
+                cs = CubicSpline(knot_f, knot_v[:, d], bc_type='clamped')
+                result[:, j, d] = cs(target)
+        else:
+            for d in range(3):
+                result[:, j, d] = np.interp(target, knot_f, knot_v[:, d])
+    return result
+
+
+def apply_bulk_offset_all_joints(pts3d: np.ndarray,
+                                 frame_start: int, frame_end: int,
+                                 deltas: np.ndarray,
+                                 taper: str = "none") -> np.ndarray:
+    """Apply per-joint offsets to ALL joints across a frame range.
+
+    Args:
+        pts3d: (T, J, 3) — will NOT be modified in-place.
+        frame_start, frame_end: Inclusive range.
+        deltas: (J, 3) offset vector per joint.
+        taper: "none", "linear", or "cosine".
+
+    Returns:
+        (N, J, 3) new positions for frames [frame_start..frame_end].
+    """
+    T, J, _ = pts3d.shape
+    fs = max(0, frame_start)
+    fe = min(T - 1, frame_end)
+    n = fe - fs + 1
+
+    original = pts3d[fs:fe + 1].copy()  # (N, J, 3)
+
+    if taper == "none":
+        weights = np.ones(n)
+    elif taper == "linear":
+        half = n / 2.0
+        weights = np.minimum(np.arange(n), np.arange(n - 1, -1, -1)) / half
+        weights = np.clip(weights, 0, 1)
+    elif taper == "cosine":
+        t = np.linspace(0, np.pi, n)
+        weights = 0.5 * (1 - np.cos(t))
+        if weights.max() > 0:
+            weights /= weights.max()
+    else:
+        weights = np.ones(n)
+
+    # weights: (N,) -> (N, 1, 1), deltas: (J, 3) -> (1, J, 3)
+    return original + deltas[None, :, :] * weights[:, None, None]

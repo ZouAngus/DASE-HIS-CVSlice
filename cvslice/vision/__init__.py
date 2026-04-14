@@ -6,4 +6,7 @@ from .adjustment import (
     find_nearest_joint, PICK_RADIUS,
     compute_ray, triangulate_two_rays,
 )
-from .propagation import AnchorSet, interpolate_anchors, apply_bulk_offset
+from .propagation import (
+    AnchorSet, interpolate_anchors, apply_bulk_offset,
+    interpolate_all_joints, apply_bulk_offset_all_joints,
+)

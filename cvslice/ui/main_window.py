@@ -25,6 +25,7 @@ from ..vision import (
     project_pts, draw_skel, draw_skel_with_confidence, clear_projection_cache,
     unproject_2d_to_3d, get_camera_depth, extract_R_t, find_nearest_joint,
     AnchorSet, interpolate_anchors, apply_bulk_offset,
+    interpolate_all_joints, apply_bulk_offset_all_joints,
     compute_ray, triangulate_two_rays,
 )
 from .video_label import VideoLabel
@@ -88,6 +89,10 @@ class ClipAnnotator(QMainWindow):
 
         # Two-view triangulation state
         self._pending_ray: dict | None = None  # {joint, pidx, cam, origin, direction, old_xyz}
+
+        # All-joints keyframe state
+        self._kf_a: int | None = None  # pts3d frame index for keyframe A
+        self._kf_b: int | None = None  # pts3d frame index for keyframe B
 
         self._build_ui()
         self.timer = QTimer()
@@ -248,6 +253,31 @@ class ClipAnnotator(QMainWindow):
         pg = QGroupBox("Propagate Edits")
         pfl = QVBoxLayout(pg)
 
+        # All-joints toggle
+        self.all_joints_cb = QCheckBox("All Joints (whole skeleton)")
+        self.all_joints_cb.setChecked(True)
+        self.all_joints_cb.setToolTip(
+            "When checked, interpolation and offset apply to ALL joints.\n"
+            "Use 'Set Frame A/B' to mark two keyframes, then interpolate.\n"
+            "When unchecked, operations apply to the clicked joint only.")
+        pfl.addWidget(self.all_joints_cb)
+
+        # Frame A/B for all-joints mode
+        kfrow = QHBoxLayout()
+        self.set_frame_a_btn = QPushButton("Set Frame A")
+        self.set_frame_a_btn.setToolTip("Mark current frame as keyframe A (start anchor)")
+        self.set_frame_a_btn.clicked.connect(self._set_frame_a)
+        kfrow.addWidget(self.set_frame_a_btn)
+        self.set_frame_b_btn = QPushButton("Set Frame B")
+        self.set_frame_b_btn.setToolTip("Mark current frame as keyframe B (end anchor)")
+        self.set_frame_b_btn.clicked.connect(self._set_frame_b)
+        kfrow.addWidget(self.set_frame_b_btn)
+        pfl.addLayout(kfrow)
+        self.kf_status_lbl = QLabel("")
+        self.kf_status_lbl.setStyleSheet("font-size:11px; color:#888;")
+        self.kf_status_lbl.setWordWrap(True)
+        pfl.addWidget(self.kf_status_lbl)
+
         # Joint selector — click-to-select (shown as read-only label)
         jrow = QHBoxLayout()
         jrow.addWidget(QLabel("Joint:"))
@@ -255,7 +285,7 @@ class ClipAnnotator(QMainWindow):
         self.joint_lbl.setStyleSheet(
             "font-weight:bold; padding:2px 6px; "
             "background:#2a2a2a; border:1px solid #555; border-radius:3px;")
-        self.joint_lbl.setToolTip("Click a joint in the view to select it for propagation")
+        self.joint_lbl.setToolTip("Click a joint in the view to select it (single-joint mode)")
         jrow.addWidget(self.joint_lbl)
         pfl.addLayout(jrow)
 
@@ -348,6 +378,14 @@ class ClipAnnotator(QMainWindow):
     def _show_editing_help(self):
         """Show a dialog with editing instructions."""
         text = (
+            "<h3>全关节插值（推荐，最省力）</h3>"
+            "<ol>"
+            "<li>勾选 <b>All Joints</b>（默认已勾选）</li>"
+            "<li>跳到偏移起始帧，确认/修正关节位置 → 点 <b>Set Frame A</b></li>"
+            "<li>跳到偏移结束帧，确认/修正关节位置 → 点 <b>Set Frame B</b></li>"
+            "<li>选择 Method (spline/linear) → 点 <b>Apply Interpolation</b></li>"
+            "<li>A 和 B 之间所有帧的所有关节自动平滑过渡</li>"
+            "</ol>"
             "<h3>单帧拖拽编辑</h3>"
             "<ol>"
             "<li>勾选 <b>Edit Mode</b></li>"
@@ -397,7 +435,7 @@ class ClipAnnotator(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e)); return
         self.xlsx_path = path
-        self.sheet_names = [s for s in xl.sheet_names if s != "1A2B"]
+        self.sheet_names = [s for s in xl.sheet_names if s not in ("1A2B", "A1A2B1")]
         self._annotations = load_annotations(path)
         self.lbl_xlsx.setText(os.path.basename(path))
         self.scene_combo.blockSignals(True)
@@ -456,6 +494,8 @@ class ClipAnnotator(QMainWindow):
         self._last_drag_delta = None
         self._last_drag_joint = None
         self._pending_ray = None
+        self._kf_a = None
+        self._kf_b = None
 
         if self.data_root:
             csv_path, subfolder = find_csv_for_scene(self.data_root, scene_name)
@@ -1047,12 +1087,21 @@ class ClipAnnotator(QMainWindow):
         self._show_frame()
 
     def _undo_joint_edit(self):
-        """Undo the last joint edit (single point or range)."""
+        """Undo the last joint edit (single point, range, or range_all)."""
         if not self._undo_stack:
             self.statusBar().showMessage("Nothing to undo.")
             return
         entry = self._undo_stack.pop()
-        if entry[0] == 'range':
+        if entry[0] == 'range_all':
+            # All-joints range undo: ('range_all', fs, fe, old_data)
+            _, fs, fe, old_data = entry
+            if self.pts3d is not None:
+                self.pts3d[fs:fe + 1] = old_data
+                self._show_frame()
+                self.statusBar().showMessage(
+                    f"Undone: ALL joints range [{fs}-{fe}] restored. "
+                    f"{len(self._undo_stack)} edits remaining.")
+        elif entry[0] == 'range':
             # Range undo: ('range', joint, fs, fe, old_data)
             _, joint, fs, fe, old_data = entry
             if self.pts3d is not None:
@@ -1092,6 +1141,46 @@ class ClipAnnotator(QMainWindow):
     # =======================================================================
     #  Propagation (multi-frame editing)
     # =======================================================================
+    def _get_current_pidx(self) -> int | None:
+        """Get the pts3d frame index for the current video frame."""
+        if self.pts3d is None:
+            return None
+        total_off = self.scene_offset + self._get_effective_act_offset(self.cur_act)
+        return v2p(self.cur_frame, self.vfps, self.pfps,
+                   self.pts3d.shape[0], total_off)
+
+    def _set_frame_a(self):
+        """Mark current frame as keyframe A for all-joints interpolation."""
+        pidx = self._get_current_pidx()
+        if pidx is None:
+            QMessageBox.warning(self, "Warning", "No 3D data loaded."); return
+        self._kf_a = pidx
+        self.prop_start_spin.setValue(pidx)
+        self._update_kf_status()
+        self.statusBar().showMessage(f"Keyframe A set at pts3d frame {pidx}")
+
+    def _set_frame_b(self):
+        """Mark current frame as keyframe B for all-joints interpolation."""
+        pidx = self._get_current_pidx()
+        if pidx is None:
+            QMessageBox.warning(self, "Warning", "No 3D data loaded."); return
+        self._kf_b = pidx
+        self.prop_end_spin.setValue(pidx)
+        self._update_kf_status()
+        self.statusBar().showMessage(f"Keyframe B set at pts3d frame {pidx}")
+
+    def _update_kf_status(self):
+        """Update the keyframe status label."""
+        parts = []
+        if self._kf_a is not None:
+            parts.append(f"A: F{self._kf_a}")
+        if self._kf_b is not None:
+            parts.append(f"B: F{self._kf_b}")
+        if parts:
+            self.kf_status_lbl.setText("  |  ".join(parts))
+        else:
+            self.kf_status_lbl.setText("")
+
     def _refresh_anchor_list(self):
         """Refresh the anchor list widget."""
         self.anchor_list.clear()
@@ -1165,42 +1254,54 @@ class ClipAnnotator(QMainWindow):
             self.slider.setValue(vframe)
 
     def _apply_interpolation(self):
-        """Apply anchor-based interpolation across the frame range."""
+        """Apply interpolation across the frame range (all joints or single joint)."""
         if self.pts3d is None:
             QMessageBox.warning(self, "Warning", "No 3D data loaded."); return
-        joint = self._selected_joint
-        if joint is None:
-            QMessageBox.warning(self, "Warning",
-                                "No joint selected. Click a joint in the view first.")
-            return
-        anchors = self._anchors.get_anchors(joint)
-        if not anchors:
-            QMessageBox.warning(self, "Warning",
-                                f"No anchors set for joint {joint}.\n"
-                                "Drag the joint to the desired position, then click Set Anchor.")
-            return
         fs = self.prop_start_spin.value()
         fe = self.prop_end_spin.value()
         if fs >= fe:
             QMessageBox.warning(self, "Warning", "Start frame must be < end frame."); return
         method = self.method_combo.currentText()
 
-        # Save undo for the entire range
-        old_data = self.pts3d[fs:fe + 1, joint].copy()
-        self._undo_stack.append(('range', joint, fs, fe, old_data))
-
-        new_positions = interpolate_anchors(
-            self.pts3d, joint, anchors, fs, fe, method=method)
-        self.pts3d[fs:fe + 1, joint] = new_positions
-        self._pts3d_dirty = True
-        n_frames = fe - fs + 1
-        self.statusBar().showMessage(
-            f"Interpolated joint {joint} across {n_frames} frames "
-            f"({len(anchors)} anchors, {method}). Ctrl+Z to undo.")
+        if self.all_joints_cb.isChecked():
+            # All-joints mode: interpolate every joint between frame A and B
+            old_data = self.pts3d[fs:fe + 1].copy()  # (N, J, 3)
+            self._undo_stack.append(('range_all', fs, fe, old_data))
+            new_positions = interpolate_all_joints(
+                self.pts3d, fs, fe, method=method)
+            self.pts3d[fs:fe + 1] = new_positions
+            self._pts3d_dirty = True
+            n_frames = fe - fs + 1
+            self.statusBar().showMessage(
+                f"Interpolated ALL joints across {n_frames} frames "
+                f"(F{fs}-F{fe}, {method}). Ctrl+Z to undo.")
+        else:
+            # Single-joint mode
+            joint = self._selected_joint
+            if joint is None:
+                QMessageBox.warning(self, "Warning",
+                                    "No joint selected. Click a joint in the view first.")
+                return
+            anchors = self._anchors.get_anchors(joint)
+            if not anchors:
+                QMessageBox.warning(self, "Warning",
+                                    f"No anchors set for joint {joint}.\n"
+                                    "Drag the joint to the desired position, then click Set Anchor.")
+                return
+            old_data = self.pts3d[fs:fe + 1, joint].copy()
+            self._undo_stack.append(('range', joint, fs, fe, old_data))
+            new_positions = interpolate_anchors(
+                self.pts3d, joint, anchors, fs, fe, method=method)
+            self.pts3d[fs:fe + 1, joint] = new_positions
+            self._pts3d_dirty = True
+            n_frames = fe - fs + 1
+            self.statusBar().showMessage(
+                f"Interpolated joint {joint} across {n_frames} frames "
+                f"({len(anchors)} anchors, {method}). Ctrl+Z to undo.")
         self._show_frame()
 
     def _apply_bulk_offset(self):
-        """Apply the last drag delta across the frame range."""
+        """Apply the last drag delta across the frame range (all joints or single)."""
         if self.pts3d is None:
             QMessageBox.warning(self, "Warning", "No 3D data loaded."); return
         if self._last_drag_delta is None:
@@ -1208,39 +1309,53 @@ class ClipAnnotator(QMainWindow):
                                 "No drag recorded yet.\n"
                                 "Drag a joint first, then use this button.")
             return
-        joint = self._selected_joint
-        if joint is None:
-            QMessageBox.warning(self, "Warning",
-                                "No joint selected. Click a joint in the view first.")
-            return
-        if self._last_drag_joint is not None and joint != self._last_drag_joint:
-            reply = QMessageBox.question(
-                self, "Joint Mismatch",
-                f"Last drag was on joint {self._last_drag_joint}, "
-                f"but propagation target is joint {joint}.\n"
-                "Apply anyway?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if reply != QMessageBox.Yes:
-                return
         fs = self.prop_start_spin.value()
         fe = self.prop_end_spin.value()
         if fs >= fe:
             QMessageBox.warning(self, "Warning", "Start frame must be < end frame."); return
         taper = self.taper_combo.currentText()
-
-        # Save undo
-        old_data = self.pts3d[fs:fe + 1, joint].copy()
-        self._undo_stack.append(('range', joint, fs, fe, old_data))
-
-        new_positions = apply_bulk_offset(
-            self.pts3d, joint, fs, fe, self._last_drag_delta, taper=taper)
-        self.pts3d[fs:fe + 1, joint] = new_positions
-        self._pts3d_dirty = True
-        n_frames = fe - fs + 1
         d = self._last_drag_delta
-        self.statusBar().showMessage(
-            f"Offset applied to joint {joint} across {n_frames} frames "
-            f"(delta=[{d[0]:.1f},{d[1]:.1f},{d[2]:.1f}], taper={taper}). Ctrl+Z to undo.")
+
+        if self.all_joints_cb.isChecked():
+            # All-joints mode: apply same delta to every joint
+            J = self.pts3d.shape[1]
+            deltas = np.tile(d, (J, 1))  # (J, 3)
+            old_data = self.pts3d[fs:fe + 1].copy()
+            self._undo_stack.append(('range_all', fs, fe, old_data))
+            new_positions = apply_bulk_offset_all_joints(
+                self.pts3d, fs, fe, deltas, taper=taper)
+            self.pts3d[fs:fe + 1] = new_positions
+            self._pts3d_dirty = True
+            n_frames = fe - fs + 1
+            self.statusBar().showMessage(
+                f"Offset applied to ALL joints across {n_frames} frames "
+                f"(delta=[{d[0]:.1f},{d[1]:.1f},{d[2]:.1f}], taper={taper}). Ctrl+Z to undo.")
+        else:
+            # Single-joint mode
+            joint = self._selected_joint
+            if joint is None:
+                QMessageBox.warning(self, "Warning",
+                                    "No joint selected. Click a joint in the view first.")
+                return
+            if self._last_drag_joint is not None and joint != self._last_drag_joint:
+                reply = QMessageBox.question(
+                    self, "Joint Mismatch",
+                    f"Last drag was on joint {self._last_drag_joint}, "
+                    f"but propagation target is joint {joint}.\n"
+                    "Apply anyway?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if reply != QMessageBox.Yes:
+                    return
+            old_data = self.pts3d[fs:fe + 1, joint].copy()
+            self._undo_stack.append(('range', joint, fs, fe, old_data))
+            new_positions = apply_bulk_offset(
+                self.pts3d, joint, fs, fe, d, taper=taper)
+            self.pts3d[fs:fe + 1, joint] = new_positions
+            self._pts3d_dirty = True
+            n_frames = fe - fs + 1
+            self.statusBar().showMessage(
+                f"Offset applied to joint {joint} across {n_frames} frames "
+                f"(delta=[{d[0]:.1f},{d[1]:.1f},{d[2]:.1f}], taper={taper}). Ctrl+Z to undo.")
         self._show_frame()
 
     def _clear_anchors(self):
