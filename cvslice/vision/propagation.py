@@ -181,17 +181,20 @@ def apply_bulk_offset(pts3d: np.ndarray, joint: int,
 
 def interpolate_all_joints(pts3d: np.ndarray,
                            frame_a: int, frame_b: int,
-                           method: str = "spline") -> np.ndarray:
-    """Interpolate ALL joints between two keyframes.
+                           method: str = "spline",
+                           keyframes: list[int] | None = None) -> np.ndarray:
+    """Interpolate ALL joints between keyframes.
 
-    Treats frame_a and frame_b as anchors (their current positions are correct),
+    Treats each keyframe as an anchor (its current position is correct),
     and smoothly interpolates every joint for all frames in between.
 
     Args:
         pts3d: (T, J, 3) full point array (read-only).
-        frame_a: First keyframe (inclusive, treated as anchor).
-        frame_b: Second keyframe (inclusive, treated as anchor).
+        frame_a: First frame of range (inclusive).
+        frame_b: Last frame of range (inclusive).
         method: "spline" or "linear".
+        keyframes: Optional list of intermediate keyframe indices.
+            If None, only frame_a and frame_b are used as anchors.
 
     Returns:
         (N, J, 3) interpolated positions for frames [frame_a..frame_b].
@@ -203,12 +206,19 @@ def interpolate_all_joints(pts3d: np.ndarray,
     if n <= 2:
         return result
 
+    # Build sorted unique knot frames within [fa, fb]
+    kf_set = {fa, fb}
+    if keyframes:
+        for k in keyframes:
+            if fa <= k <= fb:
+                kf_set.add(k)
+    knot_f = np.array(sorted(kf_set), dtype=float)
+
     target = np.arange(fa, fb + 1)
-    knot_f = np.array([fa, fb], dtype=float)
 
     for j in range(J):
-        knot_v = np.array([pts3d[fa, j], pts3d[fb, j]])  # (2, 3)
-        if method == "spline" and HAS_SCIPY:
+        knot_v = np.array([pts3d[int(f), j] for f in knot_f])  # (K, 3)
+        if method == "spline" and HAS_SCIPY and len(knot_f) >= 2:
             for d in range(3):
                 cs = CubicSpline(knot_f, knot_v[:, d], bc_type='clamped')
                 result[:, j, d] = cs(target)
