@@ -1198,6 +1198,9 @@ class ClipAnnotator(QMainWindow):
             return
         R, t = Rt
         K = np.array(intr["camera_matrix"], dtype=np.float64)
+        dc_raw = intr.get("dist_coeffs") or extr.get("dist_coeffs")
+        dc = (np.array(dc_raw, dtype=np.float64).reshape(-1)
+              if dc_raw is not None else None)
 
         pidx = self._drag_pidx
         j = self._drag_joint
@@ -1213,7 +1216,7 @@ class ClipAnnotator(QMainWindow):
         if z_cam <= 0:
             return  # point is behind camera
 
-        new_pt_flip = unproject_2d_to_3d(fx, fy, z_cam, K, R, t)
+        new_pt_flip = unproject_2d_to_3d(fx, fy, z_cam, K, R, t, dist_coeffs=dc)
 
         # Un-flip to get back to storage space
         new_pt = new_pt_flip.copy()
@@ -1250,7 +1253,10 @@ class ClipAnnotator(QMainWindow):
                     if Rt is not None:
                         R, t = Rt
                         K = np.array(intr["camera_matrix"], dtype=np.float64)
-                        origin, direction = compute_ray(float(fx), float(fy), K, R, t)
+                        dc_raw = intr.get("dist_coeffs") or extr.get("dist_coeffs")
+                        dc = (np.array(dc_raw, dtype=np.float64).reshape(-1)
+                              if dc_raw is not None else None)
+                        origin, direction = compute_ray(float(fx), float(fy), K, R, t, dist_coeffs=dc)
                         vframe = self.cur_frame  # use video frame for cross-camera matching
 
                         if (joint in self._pending_rays
