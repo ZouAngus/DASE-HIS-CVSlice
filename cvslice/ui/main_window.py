@@ -748,6 +748,15 @@ class ClipAnnotator(QMainWindow):
         self.pfps = DEFAULT_POINTS_FPS
 
     def _switch_cam(self, cam_name):
+        # Remember current pidx before switching (so skeleton stays anchored)
+        old_pidx = None
+        if self.pts3d is not None and self.pfps > 0 and self.vfps > 0:
+            sync_off = self.scene_offset + self._get_effective_act_offset(self.cur_act)
+            old_view_off = self._get_view_offset()
+            total_off = sync_off + old_view_off
+            old_pidx = v2p(self.cur_frame, self.vfps, self.pfps,
+                           self.pts3d.shape[0], total_off)
+
         if self.cap: self.cap.release(); self.cap = None
         self.active_cam = cam_name
         self._cached_frame_idx = -1
@@ -766,6 +775,20 @@ class ClipAnnotator(QMainWindow):
         self._suppress_spin = True
         self.view_off_spin.setValue(self._get_view_offset())
         self._suppress_spin = False
+
+        # Anchor skeleton: compute new video frame for same pidx under new view offset
+        if old_pidx is not None and self.vfps > 0 and self.pfps > 0:
+            sync_off = self.scene_offset + self._get_effective_act_offset(self.cur_act)
+            new_view_off = self._get_view_offset()
+            total_off_new = sync_off + new_view_off
+            ratio = self.vfps / self.pfps
+            new_vframe = int(round(old_pidx * ratio - total_off_new))
+            new_vframe = max(self.clip_start, min(self.clip_end, new_vframe))
+            self.cur_frame = new_vframe
+            self.slider.blockSignals(True)
+            self.slider.setValue(new_vframe)
+            self.slider.blockSignals(False)
+
         self._read_frame(self.cur_frame)
         self._show_frame()
 
@@ -948,13 +971,14 @@ class ClipAnnotator(QMainWindow):
             "<li><b>Action</b> — 单个 action 的偏移，仅影响当前选中的 action。"
             "当某个动作片段的 3D 数据与视频局部不对齐时使用。"
             "未设置的 action 会继承前一个 action 的值。</li>"
-            "<li><b>View</b> — 当前相机视角的偏移，仅影响当前视角。"
-            "当某个相机的视频与其他相机有帧偏差时使用。"
-            "切换相机时会自动加载该视角的值。</li>"
+            "<li><b>View</b> — 当前相机视角的视频帧偏移。"
+            "当不同相机的视频录制起始时间不同时使用。"
+            "切换相机时，骨架帧保持不变，视频帧自动跳转到对应位置。</li>"
             "</ul>"
             "<p><b>总偏移 = Scene + Action + View</b></p>"
             "<p>调整顺序建议：先调 Scene 对齐大部分视角，"
             "再用 View 微调个别视角的偏差。</p>"
+            "<p><i>切换相机时骨架伝为锚点，视频帧自动对齐。</i></p>"
         )
         QMessageBox.information(self, "Sync Offset 说明", text)
 
