@@ -289,12 +289,15 @@ class ClipAnnotator(QMainWindow):
             "When checked, interpolation and offset apply to ALL joints.\n"
             "Use 'Add Keyframe' to mark multiple keyframes, then interpolate.\n"
             "When unchecked, operations apply to the clicked joint only.")
+        self.all_joints_cb.stateChanged.connect(lambda s: self._refresh_kf_list())
         pfl.addWidget(self.all_joints_cb)
 
-        # Keyframe controls for all-joints mode
+        # Keyframe controls (unified for both modes)
         kfrow = QHBoxLayout()
         self.add_kf_btn = QPushButton("Add Keyframe")
-        self.add_kf_btn.setToolTip("Mark current frame as a keyframe anchor.\nAdd multiple keyframes for multi-point interpolation.")
+        self.add_kf_btn.setToolTip(
+            "All Joints: mark current frame as a whole-skeleton keyframe.\n"
+            "Single Joint: mark current frame as a keyframe for the selected joint.")
         self.add_kf_btn.clicked.connect(self._add_keyframe)
         kfrow.addWidget(self.add_kf_btn)
         self.del_kf_btn = QPushButton("Del Keyframe")
@@ -303,7 +306,7 @@ class ClipAnnotator(QMainWindow):
         kfrow.addWidget(self.del_kf_btn)
         pfl.addLayout(kfrow)
         self.kf_list = QListWidget()
-        self.kf_list.setMaximumHeight(72)
+        self.kf_list.setMaximumHeight(90)
         self.kf_list.setToolTip("Keyframes: click to jump to that frame")
         self.kf_list.currentRowChanged.connect(self._on_kf_selected)
         pfl.addWidget(self.kf_list)
@@ -322,27 +325,6 @@ class ClipAnnotator(QMainWindow):
         self.joint_lbl.setToolTip("Click a joint in the view to select it (single-joint mode)")
         jrow.addWidget(self.joint_lbl)
         pfl.addLayout(jrow)
-
-        # Anchor controls
-        arow = QHBoxLayout()
-        self.set_anchor_btn = QPushButton("Set Anchor")
-        self.set_anchor_btn.setToolTip(
-            "Mark current frame as anchor for the selected joint.\n"
-            "Drag the joint first, then click Set Anchor.")
-        self.set_anchor_btn.clicked.connect(self._set_anchor)
-        arow.addWidget(self.set_anchor_btn)
-        self.del_anchor_btn = QPushButton("Del Anchor")
-        self.del_anchor_btn.setToolTip("Remove anchor at current frame")
-        self.del_anchor_btn.clicked.connect(self._del_anchor)
-        arow.addWidget(self.del_anchor_btn)
-        pfl.addLayout(arow)
-
-        # Anchor list
-        self.anchor_list = QListWidget()
-        self.anchor_list.setMaximumHeight(100)
-        self.anchor_list.setToolTip("Anchors: joint@frame")
-        self.anchor_list.currentRowChanged.connect(self._on_anchor_selected)
-        pfl.addWidget(self.anchor_list)
 
         # Range for interpolation (pts3d frame indices)
         rform = QFormLayout()
@@ -400,7 +382,7 @@ class ClipAnnotator(QMainWindow):
         pfl.addWidget(self.apply_offset_btn)
 
         # Clear
-        self.clear_anchors_btn = QPushButton("Clear All Anchors")
+        self.clear_anchors_btn = QPushButton("Clear All Keyframes")
         self.clear_anchors_btn.clicked.connect(self._clear_anchors)
         pfl.addWidget(self.clear_anchors_btn)
 
@@ -488,6 +470,13 @@ class ClipAnnotator(QMainWindow):
             "<li>选择 Method (spline/linear) → 点 <b>Apply Interpolation</b></li>"
             "<li>关键帧之间所有帧的所有关节自动平滑过渡</li>"
             "</ol>"
+            "<h3>单关节插值（精修单个关节）</h3>"
+            "<ol>"
+            "<li>取消勾选 <b>All Joints</b>，点击画面中的关节选中它</li>"
+            "<li>跳到偏移起始帧，拖拽关节到正确位置 → 点 <b>Add Keyframe</b></li>"
+            "<li>跳到偏移结束帧，拖拽同一关节 → 点 <b>Add Keyframe</b></li>"
+            "<li>选择 Method → 点 <b>Apply Interpolation</b>，只修改该关节</li>"
+            "</ol>"
             "<h3>单帧拖拽编辑</h3>"
             "<ol>"
             "<li>勾选 <b>Edit Mode</b></li>"
@@ -497,18 +486,9 @@ class ClipAnnotator(QMainWindow):
             "<h3>双视角三角化（修正深度）</h3>"
             "<ol>"
             "<li>勾选 <b>Edit Mode</b> + <b>Triangulate (2-view)</b></li>"
-            "<li>在相机 A 拖拽一个或多个关节到正确的 2D 位置 → 记录射线（青色 T1 标记）</li>"
+            "<li>在相机 A 拖拽关节到正确的 2D 位置 → 记录射线（青色 T1 标记）</li>"
             "<li>切换到相机 B，拖拽同一关节 → 自动三角化得到精确 3D</li>"
-            "<li>支持批量：在相机 A 拖拽多个关节，切换到 B 后逐个拖拽完成三角化</li>"
-            "<li>不同视角的 View offset 会自动处理帧对齐</li>"
             "<li>提示：选择夹角大的两个相机效果最好</li>"
-            "</ol>"
-            "<h3>锚点插值（修正连续偏移）</h3>"
-            "<ol>"
-            "<li>跳到偏移起始帧，拖拽关节到正确位置 → 点 <b>Set Anchor</b></li>"
-            "<li>跳到偏移结束帧，拖拽同一关节 → 点 <b>Set Anchor</b></li>"
-            "<li>可以设置多个锚点，插值会依次经过每个锚点</li>"
-            "<li>选择 Method (spline/linear) → 点 <b>Apply Interpolation</b></li>"
             "</ol>"
             "<h3>批量偏移（整段平移）</h3>"
             "<ol>"
@@ -520,18 +500,13 @@ class ClipAnnotator(QMainWindow):
             "<h3>快捷键</h3>"
             "<ul>"
             "<li><b>Space</b> — 播放/暂停</li>"
-            "<li><b>A/D</b> — 前/后一帧</li>"
-            "<li><b>Shift+A/D</b> — 前/后 5 帧</li>"
+            "<li><b>A/D</b> — 前/后一帧，<b>Shift+A/D</b> — ±5 帧</li>"
             "<li><b>Q/E</b> — 前/后 1 秒</li>"
             "<li><b>1-7</b> — 切换相机视角</li>"
             "<li><b>Home/End</b> — 跳到片段起始/结束</li>"
-            "<li><b>Tab</b> — 切换 Edit Mode</li>"
-            "<li><b>K</b> — 添加关键帧</li>"
-            "<li><b>R</b> — 重置缩放/平移</li>"
-            "<li><b>Ctrl+Z</b> — 撤销</li>"
-            "<li><b>Ctrl+滚轮</b> — 缩放视图</li>"
-            "<li><b>中键拖拽 / Ctrl+拖拽</b> — 平移视图</li>"
-            "<li><b>中键双击 / Ctrl+双击</b> — 重置视图</li>"
+            "<li><b>Tab</b> — 切换 Edit Mode，<b>K</b> — 添加关键帧</li>"
+            "<li><b>R</b> — 重置缩放，<b>Ctrl+Z</b> — 撤销</li>"
+            "<li><b>Ctrl+滚轮</b> — 缩放，<b>中键拖拽</b> — 平移</li>"
             "</ul>"
         )
 
@@ -546,6 +521,13 @@ class ClipAnnotator(QMainWindow):
             "<li>Choose Method (spline/linear) → click <b>Apply Interpolation</b></li>"
             "<li>All joints between keyframes are smoothly interpolated</li>"
             "</ol>"
+            "<h3>Single-Joint Interpolation (Precision Fix)</h3>"
+            "<ol>"
+            "<li>Uncheck <b>All Joints</b>, click a joint in the view to select it</li>"
+            "<li>Go to drift start, drag joint to correct position → click <b>Add Keyframe</b></li>"
+            "<li>Go to drift end, drag same joint → click <b>Add Keyframe</b></li>"
+            "<li>Choose Method → click <b>Apply Interpolation</b> — only that joint is modified</li>"
+            "</ol>"
             "<h3>Single-Frame Drag Edit</h3>"
             "<ol>"
             "<li>Check <b>Edit Mode</b></li>"
@@ -557,16 +539,7 @@ class ClipAnnotator(QMainWindow):
             "<li>Check <b>Edit Mode</b> + <b>Triangulate (2-view)</b></li>"
             "<li>In camera A, drag joint(s) to correct 2D position → ray recorded (cyan T1 marker)</li>"
             "<li>Switch to camera B, drag the same joint → auto-triangulates to precise 3D</li>"
-            "<li>Batch: drag multiple joints in cam A, then complete each in cam B</li>"
-            "<li>View offsets across cameras are handled automatically</li>"
             "<li>Tip: choose two cameras with a large angle between them</li>"
-            "</ol>"
-            "<h3>Anchor Interpolation (Fix Continuous Drift)</h3>"
-            "<ol>"
-            "<li>Go to drift start, drag joint to correct position → click <b>Set Anchor</b></li>"
-            "<li>Go to drift end, drag same joint → click <b>Set Anchor</b></li>"
-            "<li>Add more anchors as needed — interpolation passes through each</li>"
-            "<li>Choose Method (spline/linear) → click <b>Apply Interpolation</b></li>"
             "</ol>"
             "<h3>Bulk Offset (Shift Entire Segment)</h3>"
             "<ol>"
@@ -578,18 +551,13 @@ class ClipAnnotator(QMainWindow):
             "<h3>Keyboard Shortcuts</h3>"
             "<ul>"
             "<li><b>Space</b> — Play / Pause</li>"
-            "<li><b>A/D</b> — Previous / Next frame</li>"
-            "<li><b>Shift+A/D</b> — ±5 frames</li>"
+            "<li><b>A/D</b> — ±1 frame, <b>Shift+A/D</b> — ±5 frames</li>"
             "<li><b>Q/E</b> — ±1 second</li>"
             "<li><b>1-7</b> — Switch camera view</li>"
             "<li><b>Home/End</b> — Jump to clip start / end</li>"
-            "<li><b>Tab</b> — Toggle Edit Mode</li>"
-            "<li><b>K</b> — Add keyframe</li>"
-            "<li><b>R</b> — Reset zoom / pan</li>"
-            "<li><b>Ctrl+Z</b> — Undo</li>"
-            "<li><b>Ctrl+Scroll</b> — Zoom view</li>"
-            "<li><b>Middle-drag / Ctrl+drag</b> — Pan view</li>"
-            "<li><b>Middle double-click / Ctrl+double-click</b> — Reset view</li>"
+            "<li><b>Tab</b> — Toggle Edit Mode, <b>K</b> — Add keyframe</li>"
+            "<li><b>R</b> — Reset zoom, <b>Ctrl+Z</b> — Undo</li>"
+            "<li><b>Ctrl+Scroll</b> — Zoom, <b>Middle-drag</b> — Pan</li>"
             "</ul>"
         )
 
@@ -719,7 +687,7 @@ class ClipAnnotator(QMainWindow):
         self.lbl_scene_info.setText("  |  ".join(info_parts))
 
         self._refresh_act_list()
-        self._refresh_anchor_list()
+        self._refresh_kf_list()
         if self.cap:
             self.cap.release(); self.cap = None
         self._cached_frame_idx = -1
@@ -1422,51 +1390,130 @@ class ClipAnnotator(QMainWindow):
                    self.pts3d.shape[0], total_off)
 
     def _add_keyframe(self):
-        """Add current frame as a keyframe for all-joints interpolation."""
+        """Add current frame as a keyframe (all-joints or single-joint)."""
         pidx = self._get_current_pidx()
         if pidx is None:
             QMessageBox.warning(self, "Warning", "No 3D data loaded."); return
-        if pidx not in self._keyframes:
-            self._keyframes.append(pidx)
-            self._keyframes.sort()
-        self._refresh_kf_list()
-        # Auto-update From/To to cover all keyframes
-        if self._keyframes:
-            self.prop_start_spin.setValue(self._keyframes[0])
-            self.prop_end_spin.setValue(self._keyframes[-1])
-        self.statusBar().showMessage(f"Keyframe added at 3D frame {pidx} ({len(self._keyframes)} total)")
+        if self.all_joints_cb.isChecked():
+            # All-joints mode
+            if pidx not in self._keyframes:
+                self._keyframes.append(pidx)
+                self._keyframes.sort()
+            self._refresh_kf_list()
+            if self._keyframes:
+                self.prop_start_spin.setValue(self._keyframes[0])
+                self.prop_end_spin.setValue(self._keyframes[-1])
+            self.statusBar().showMessage(
+                f"Keyframe added at 3D frame {pidx} ({len(self._keyframes)} total)")
+        else:
+            # Single-joint mode: store as anchor internally
+            joint = self._selected_joint
+            if joint is None:
+                QMessageBox.warning(self, "Warning",
+                                    "No joint selected. Click a joint in the view first.")
+                return
+            if joint >= self.pts3d.shape[1]:
+                QMessageBox.warning(self, "Warning",
+                                    f"Joint {joint} out of range."); return
+            xyz = self.pts3d[pidx, joint].copy()
+            self._anchors.set_anchor(joint, pidx, xyz)
+            self._refresh_kf_list()
+            # Auto-update range
+            anchors = self._anchors.get_anchors(joint)
+            if anchors:
+                frames = sorted(anchors.keys())
+                self.prop_start_spin.setValue(max(0, frames[0]))
+                self.prop_end_spin.setValue(min(self.pts3d.shape[0] - 1, frames[-1]))
+            self.statusBar().showMessage(
+                f"Keyframe set: joint {joint} at 3D frame {pidx}")
+        self._show_frame()
 
     def _del_keyframe(self):
-        """Remove the selected keyframe from the list."""
+        """Remove the selected keyframe."""
         row = self.kf_list.currentRow()
-        if row < 0 or row >= len(self._keyframes):
+        if row < 0:
             QMessageBox.warning(self, "Warning", "No keyframe selected."); return
-        removed = self._keyframes.pop(row)
-        self._refresh_kf_list()
-        if self._keyframes:
-            self.prop_start_spin.setValue(self._keyframes[0])
-            self.prop_end_spin.setValue(self._keyframes[-1])
-        self.statusBar().showMessage(f"Keyframe F{removed} removed ({len(self._keyframes)} remaining)")
+        if self.all_joints_cb.isChecked():
+            if row >= len(self._keyframes): return
+            removed = self._keyframes.pop(row)
+            self._refresh_kf_list()
+            if self._keyframes:
+                self.prop_start_spin.setValue(self._keyframes[0])
+                self.prop_end_spin.setValue(self._keyframes[-1])
+            self.statusBar().showMessage(
+                f"Keyframe F{removed} removed ({len(self._keyframes)} remaining)")
+        else:
+            # Single-joint: remove from anchors
+            joint = self._selected_joint
+            if joint is None: return
+            anchors = self._anchors.get_anchors(joint)
+            if not anchors: return
+            frames = sorted(anchors.keys())
+            if row >= len(frames): return
+            pidx = frames[row]
+            self._anchors.remove_anchor(joint, pidx)
+            self._refresh_kf_list()
+            self.statusBar().showMessage(
+                f"Keyframe removed: joint {joint} at frame {pidx}")
+        self._show_frame()
 
     def _refresh_kf_list(self):
         """Refresh the keyframe list widget and status label."""
         self.kf_list.clear()
         ratio = self.vfps / self.pfps if (self.pfps > 0 and self.vfps > 0) else 1.0
         total_off = self.scene_offset + self._get_effective_act_offset(self.cur_act) + self._get_view_offset()
-        for i, pidx in enumerate(self._keyframes):
-            vf = int(round(pidx * ratio - total_off))
-            self.kf_list.addItem(f"KF{i+1}: 3D F{pidx} (\u2248video {vf})")
-        n = len(self._keyframes)
-        if n == 0:
-            self.kf_status_lbl.setText("")
+        if self.all_joints_cb.isChecked():
+            for i, pidx in enumerate(self._keyframes):
+                vf = int(round(pidx * ratio - total_off))
+                self.kf_list.addItem(f"KF{i+1}: 3D F{pidx} (\u2248video {vf})")
+            n = len(self._keyframes)
+            self.kf_status_lbl.setText(f"{n} keyframe(s) set" if n else "")
         else:
-            self.kf_status_lbl.setText(f"{n} keyframe(s) set")
+            # Show per-joint keyframes (anchors) for selected joint
+            joint = self._selected_joint
+            if joint is not None:
+                anchors = self._anchors.get_anchors(joint)
+                if anchors:
+                    for i, (pidx, xyz) in enumerate(sorted(anchors.items())):
+                        vf = int(round(pidx * ratio - total_off))
+                        self.kf_list.addItem(
+                            f"J{joint} KF{i+1}: 3D F{pidx} (\u2248video {vf})")
+                n = len(anchors) if anchors else 0
+                self.kf_status_lbl.setText(
+                    f"Joint {joint}: {n} keyframe(s)" if n else "")
+            else:
+                # Show all anchors across all joints
+                for joint_a, frame, xyz in self._anchors.summary():
+                    vf = int(round(frame * ratio - total_off))
+                    self.kf_list.addItem(
+                        f"J{joint_a} @ 3D F{frame} (\u2248video {vf})")
+                total = len(self._anchors.summary())
+                self.kf_status_lbl.setText(
+                    f"{total} joint keyframe(s)" if total else "")
 
     def _on_kf_selected(self, row):
         """Jump to the frame of the selected keyframe."""
-        if row < 0 or row >= len(self._keyframes): return
-        pidx = self._keyframes[row]
-        if self.pts3d is not None and self.pfps > 0 and self.vfps > 0:
+        if row < 0: return
+        pidx = None
+        if self.all_joints_cb.isChecked():
+            if row >= len(self._keyframes): return
+            pidx = self._keyframes[row]
+        else:
+            joint = self._selected_joint
+            if joint is not None:
+                anchors = self._anchors.get_anchors(joint)
+                if anchors:
+                    frames = sorted(anchors.keys())
+                    if row < len(frames):
+                        pidx = frames[row]
+            else:
+                summary = self._anchors.summary()
+                if row < len(summary):
+                    joint_a, frame, _ = summary[row]
+                    self._selected_joint = joint_a
+                    self.joint_lbl.setText(f"Joint {joint_a}")
+                    pidx = frame
+        if pidx is not None and self.pts3d is not None and self.pfps > 0 and self.vfps > 0:
             total_off = self.scene_offset + self._get_effective_act_offset(self.cur_act) + self._get_view_offset()
             vframe = int(round(pidx * (self.vfps / self.pfps) - total_off))
             vframe = max(self.clip_start, min(self.clip_end, vframe))
@@ -1493,78 +1540,6 @@ class ClipAnnotator(QMainWindow):
         """Show a brief feedback message in the propagation panel."""
         self.prop_feedback_lbl.setText(text)
         self._feedback_timer.start(duration_ms)
-
-    def _refresh_anchor_list(self):
-        """Refresh the anchor list widget."""
-        self.anchor_list.clear()
-        for joint, frame, xyz in self._anchors.summary():
-            self.anchor_list.addItem(
-                f"J{joint} @ F{frame}  ({xyz[0]:.1f}, {xyz[1]:.1f}, {xyz[2]:.1f})")
-
-    def _set_anchor(self):
-        """Set an anchor at the current frame for the selected joint."""
-        if self.pts3d is None:
-            QMessageBox.warning(self, "Warning", "No 3D data loaded."); return
-        if self._drag_pidx is None:
-            # Compute pidx from current frame
-            total_off = self.scene_offset + self._get_effective_act_offset(self.cur_act) + self._get_view_offset()
-            pidx = v2p(self.cur_frame, self.vfps, self.pfps,
-                       self.pts3d.shape[0], total_off)
-        else:
-            pidx = self._drag_pidx
-        joint = self._selected_joint
-        if joint is None:
-            QMessageBox.warning(self, "Warning",
-                                "No joint selected. Click a joint in the view first.")
-            return
-        if joint >= self.pts3d.shape[1]:
-            QMessageBox.warning(self, "Warning",
-                                f"Joint {joint} out of range (max {self.pts3d.shape[1]-1}).")
-            return
-        xyz = self.pts3d[pidx, joint].copy()
-        self._anchors.set_anchor(joint, pidx, xyz)
-        self._refresh_anchor_list()
-        # Auto-update range to cover all anchors for this joint
-        anchors = self._anchors.get_anchors(joint)
-        if anchors:
-            frames = sorted(anchors.keys())
-            self.prop_start_spin.setValue(max(0, frames[0]))
-            self.prop_end_spin.setValue(min(self.pts3d.shape[0] - 1, frames[-1]))
-        self.statusBar().showMessage(
-            f"Anchor set: joint {joint} at pts3d frame {pidx}")
-        self._show_frame()
-
-    def _del_anchor(self):
-        """Remove anchor at current frame for selected joint."""
-        if self.pts3d is None: return
-        total_off = self.scene_offset + self._get_effective_act_offset(self.cur_act) + self._get_view_offset()
-        pidx = v2p(self.cur_frame, self.vfps, self.pfps,
-                   self.pts3d.shape[0], total_off)
-        joint = self._selected_joint
-        if joint is None:
-            QMessageBox.warning(self, "Warning",
-                                "No joint selected. Click a joint in the view first.")
-            return
-        self._anchors.remove_anchor(joint, pidx)
-        self._refresh_anchor_list()
-        self.statusBar().showMessage(
-            f"Anchor removed: joint {joint} at frame {pidx}")
-
-    def _on_anchor_selected(self, row):
-        """Jump to the frame of the selected anchor."""
-        summary = self._anchors.summary()
-        if row < 0 or row >= len(summary): return
-        joint, frame, _ = summary[row]
-        self._selected_joint = joint
-        self.joint_lbl.setText(f"Joint {joint}")
-        # Convert pts3d frame back to video frame (approximate inverse of v2p)
-        if self.pts3d is not None and self.pfps > 0 and self.vfps > 0:
-            total_off = self.scene_offset + self._get_effective_act_offset(self.cur_act) + self._get_view_offset()
-            vframe = int(round(frame * (self.vfps / self.pfps) - total_off))
-            vframe = max(self.clip_start, min(self.clip_end, vframe))
-            self.cur_frame = vframe
-            self._read_frame(vframe)
-            self.slider.setValue(vframe)
 
     def _apply_interpolation(self):
         """Apply interpolation across the frame range (all joints or single joint)."""
@@ -1682,9 +1657,8 @@ class ClipAnnotator(QMainWindow):
         """Clear all anchors and keyframes."""
         self._anchors.clear_all()
         self._keyframes.clear()
-        self._refresh_anchor_list()
         self._refresh_kf_list()
-        self.statusBar().showMessage("All anchors and keyframes cleared.")
+        self.statusBar().showMessage("All keyframes cleared.")
 
     # =======================================================================
     #  Keyboard
