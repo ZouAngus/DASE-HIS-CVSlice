@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QListWidget,
     QFileDialog, QSlider, QSpinBox, QComboBox, QCheckBox,
     QProgressDialog, QMessageBox, QGroupBox, QFormLayout, QSizePolicy,
-    QInputDialog, QMenu,
+    QInputDialog, QMenu, QToolTip,
 )
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import Qt, QTimer, QCoreApplication
@@ -97,6 +97,14 @@ class ClipAnnotator(QMainWindow):
         # All-joints keyframe state
         self._keyframes: list[int] = []  # sorted pts3d frame indices for keyframes
 
+        # Auto-checkpoint for 3D edits
+        self._checkpoint_dir: str | None = None
+        self._edits_since_checkpoint = 0
+        _CHECKPOINT_INTERVAL = 50  # auto-save every N edits
+
+        # Undo stack cap
+        self._UNDO_MAX = 200
+
         self._build_ui()
         self.timer = QTimer()
         self.timer.timeout.connect(self._tick)
@@ -179,12 +187,17 @@ class ClipAnnotator(QMainWindow):
         cvl.addWidget(self.info_lbl)
         self.slider = QSlider(Qt.Horizontal); self.slider.setRange(0, 0)
         self.slider.valueChanged.connect(self._on_slider)
+        self.slider.setTracking(True)
+        self.slider.installEventFilter(self)
         cvl.addWidget(self.slider)
         br = QHBoxLayout()
         for txt, fn in [("<< -1s", lambda: self._jump(-1)), ("< Prev", self._prev),
                          ("Play / Pause", self._toggle_play), ("Next >", self._nxt),
                          ("+1s >>", lambda: self._jump(1))]:
             b = QPushButton(txt); b.clicked.connect(fn); br.addWidget(b)
+        self.zoom_lbl = QLabel("")
+        self.zoom_lbl.setStyleSheet("font-size:11px; color:#888; padding:0 4px;")
+        br.addWidget(self.zoom_lbl)
         cvl.addLayout(br)
         hl.addWidget(center, stretch=1)
 
@@ -254,6 +267,11 @@ class ClipAnnotator(QMainWindow):
         self.tri_status_lbl.setStyleSheet("font-size:11px; color:#888;")
         self.tri_status_lbl.setWordWrap(True)
         ff.addRow(self.tri_status_lbl)
+        self.show_jid_cb = QCheckBox("Show Joint IDs")
+        self.show_jid_cb.setChecked(False)
+        self.show_jid_cb.setToolTip("Display joint index numbers on the skeleton")
+        self.show_jid_cb.stateChanged.connect(lambda s: self._show_frame())
+        ff.addRow(self.show_jid_cb)
         for axis, idx in [("Flip X", 0), ("Flip Y", 1), ("Flip Z", 2)]:
             cb = QCheckBox(axis)
             cb.stateChanged.connect(lambda s, i=idx: self._set_flip(i, s == Qt.Checked))
@@ -397,7 +415,8 @@ class ClipAnnotator(QMainWindow):
         rv.addStretch()
         hl.addWidget(right)
         self.statusBar().showMessage(
-            "Space=Play  A/D=Prev/Next  Q/E=-/+1s  W/S=SceneOffset  Up/Down=Action")
+            "Space=Play  A/D=Prev/Next  Shift+A/D=±5  Q/E=-/+1s  W/S=Offset  "
+            "1-7=Camera  Home/End=ClipEdge  Tab=EditMode  K=Keyframe  Ctrl+Scroll=Zoom")
 
     def _set_flip(self, idx, val):
         self.flip[idx] = val; self._show_frame()
@@ -466,8 +485,17 @@ class ClipAnnotator(QMainWindow):
             "<ul>"
             "<li><b>Space</b> — 播放/暂停</li>"
             "<li><b>A/D</b> — 前/后一帧</li>"
+            "<li><b>Shift+A/D</b> — 前/后 5 帧</li>"
             "<li><b>Q/E</b> — 前/后 1 秒</li>"
+            "<li><b>1-7</b> — 切换相机视角</li>"
+            "<li><b>Home/End</b> — 跳到片段起始/结束</li>"
+            "<li><b>Tab</b> — 切换 Edit Mode</li>"
+            "<li><b>K</b> — 添加关键帧</li>"
+            "<li><b>R</b> — 重置缩放/平移</li>"
             "<li><b>Ctrl+Z</b> — 撤销</li>"
+            "<li><b>Ctrl+滚轮</b> — 缩放视图</li>"
+            "<li><b>中键拖拽 / Ctrl+拖拽</b> — 平移视图</li>"
+            "<li><b>中键双击 / Ctrl+双击</b> — 重置视图</li>"
             "</ul>"
         )
         QMessageBox.information(self, "Editing Guide", text)
@@ -972,6 +1000,15 @@ class ClipAnnotator(QMainWindow):
                     if self.pts3d_was_nan is not None:
                         nan_mask = self.pts3d_was_nan[pidx]
                     draw_skel_with_confidence(frame, proj, nan_mask)
+                    # Joint ID overlay
+                    if self.show_jid_cb.isChecked():
+                        h_f, w_f = frame.shape[:2]
+                        for ji in range(len(proj)):
+                            jx, jy = int(proj[ji][0]), int(proj[ji][1])
+                            if 0 <= jx < w_f and 0 <= jy < h_f:
+                                cv2.putText(frame, str(ji), (jx + 6, jy - 6),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                                            (200, 200, 200), 1, cv2.LINE_AA)
                     # Highlight dragged joint
                     if self._drag_joint is not None and self._drag_joint < len(proj):
                         jx, jy = int(proj[self._drag_joint][0]), int(proj[self._drag_joint][1])
@@ -1007,10 +1044,11 @@ class ClipAnnotator(QMainWindow):
         h, w, ch = rgb.shape
         bpl = ch * w
         qimg = QImage(rgb.data, w, h, bpl, QImage.Format_RGB888)
-        transform = Qt.FastTransformation if self.playing else Qt.SmoothTransformation
-        pix = QPixmap.fromImage(qimg).scaled(
-            self.vid_lbl.size(), Qt.KeepAspectRatio, transform)
+        pix = QPixmap.fromImage(qimg)
         self.vid_lbl.setPixmap(pix)
+        # Update zoom indicator
+        z = self.vid_lbl.zoom_level
+        self.zoom_lbl.setText(f"{z:.0%}" if z != 1.0 else "")
         vf = self.vfps if self.vfps > 0 else 30.0
         t_cur = self.cur_frame / vf
         t_tot = self.vtotal / vf if self.vtotal > 0 else 0
@@ -1026,6 +1064,44 @@ class ClipAnnotator(QMainWindow):
     # =======================================================================
     #  Joint dragging (Edit Mode)
     # =======================================================================
+    def _push_undo(self, entry):
+        """Push to undo stack with cap and auto-checkpoint."""
+        self._undo_stack.append(entry)
+        if len(self._undo_stack) > self._UNDO_MAX:
+            self._undo_stack = self._undo_stack[-self._UNDO_MAX:]
+        self._edits_since_checkpoint += 1
+        if self._edits_since_checkpoint >= 50:
+            self._auto_checkpoint()
+
+    def _auto_checkpoint(self):
+        """Auto-save 3D points to a checkpoint file."""
+        if self.pts3d is None:
+            return
+        import tempfile, os
+        if self._checkpoint_dir is None:
+            self._checkpoint_dir = tempfile.mkdtemp(prefix="cvslice_ckpt_")
+        path = os.path.join(self._checkpoint_dir, "pts3d_checkpoint.npy")
+        try:
+            np.save(path, self.pts3d)
+            self._edits_since_checkpoint = 0
+            self.statusBar().showMessage(
+                f"Auto-checkpoint saved ({self.pts3d.shape[0]} frames) → {path}")
+        except Exception as e:
+            self.statusBar().showMessage(f"Checkpoint failed: {e}")
+
+    def eventFilter(self, obj, event):
+        """Show frame number tooltip when hovering over the slider."""
+        if obj is self.slider:
+            from PyQt5.QtCore import QEvent
+            if event.type() in (QEvent.MouseMove, QEvent.HoverMove, QEvent.MouseButtonPress):
+                val = self.slider.value()
+                vf = self.vfps if self.vfps > 0 else 30.0
+                t = val / vf
+                tip = f"Frame {val}  ({fmt_time(t)})"
+                pos = event.globalPos() if hasattr(event, 'globalPos') else event.globalPosition().toPoint()
+                QToolTip.showText(pos, tip, self.slider)
+        return super().eventFilter(obj, event)
+
     def _on_mouse_press(self, fx, fy):
         """Mouse pressed on video at frame coords (fx, fy)."""
         if not self.edit_cb.isChecked():
@@ -1042,7 +1118,7 @@ class ClipAnnotator(QMainWindow):
             self._drag_joint = joint
             # Save old position for undo BEFORE any move
             pidx = self._drag_pidx
-            self._undo_stack.append(
+            self._push_undo(
                 (pidx, joint, self.pts3d[pidx, joint].copy()))
             self.statusBar().showMessage(f"Dragging joint {joint}...")
             self._show_frame()  # highlight selected joint
@@ -1410,7 +1486,7 @@ class ClipAnnotator(QMainWindow):
         if self.all_joints_cb.isChecked():
             # All-joints mode: interpolate every joint using keyframes as anchors
             old_data = self.pts3d[fs:fe + 1].copy()  # (N, J, 3)
-            self._undo_stack.append(('range_all', fs, fe, old_data))
+            self._push_undo(('range_all', fs, fe, old_data))
             # Pass intermediate keyframes (excluding fs/fe which are boundaries)
             kf_list = [k for k in self._keyframes if fs < k < fe]
             new_positions = interpolate_all_joints(
@@ -1437,7 +1513,7 @@ class ClipAnnotator(QMainWindow):
                                     "Drag the joint to the desired position, then click Set Anchor.")
                 return
             old_data = self.pts3d[fs:fe + 1, joint].copy()
-            self._undo_stack.append(('range', joint, fs, fe, old_data))
+            self._push_undo(('range', joint, fs, fe, old_data))
             new_positions = interpolate_anchors(
                 self.pts3d, joint, anchors, fs, fe, method=method)
             self.pts3d[fs:fe + 1, joint] = new_positions
@@ -1470,7 +1546,7 @@ class ClipAnnotator(QMainWindow):
             J = self.pts3d.shape[1]
             deltas = np.tile(d, (J, 1))  # (J, 3)
             old_data = self.pts3d[fs:fe + 1].copy()
-            self._undo_stack.append(('range_all', fs, fe, old_data))
+            self._push_undo(('range_all', fs, fe, old_data))
             new_positions = apply_bulk_offset_all_joints(
                 self.pts3d, fs, fe, deltas, taper=taper)
             self.pts3d[fs:fe + 1] = new_positions
@@ -1497,7 +1573,7 @@ class ClipAnnotator(QMainWindow):
                 if reply != QMessageBox.Yes:
                     return
             old_data = self.pts3d[fs:fe + 1, joint].copy()
-            self._undo_stack.append(('range', joint, fs, fe, old_data))
+            self._push_undo(('range', joint, fs, fe, old_data))
             new_positions = apply_bulk_offset(
                 self.pts3d, joint, fs, fe, d, taper=taper)
             self.pts3d[fs:fe + 1, joint] = new_positions
@@ -1526,8 +1602,17 @@ class ClipAnnotator(QMainWindow):
         if mods & Qt.ControlModifier and k == Qt.Key_Z:
             self._undo_joint_edit()
         elif k == Qt.Key_Space: self._toggle_play()
-        elif k == Qt.Key_A: self._prev()
-        elif k == Qt.Key_D: self._nxt()
+        # Shift+A/D = ±5 frames, plain A/D = ±1
+        elif k == Qt.Key_A:
+            if mods & Qt.ShiftModifier:
+                self._step_frames(-5)
+            else:
+                self._prev()
+        elif k == Qt.Key_D:
+            if mods & Qt.ShiftModifier:
+                self._step_frames(5)
+            else:
+                self._nxt()
         elif k == Qt.Key_Q: self._jump(-1)
         elif k == Qt.Key_E: self._jump(1)
         elif k == Qt.Key_W: self.scene_off_spin.setValue(self.scene_off_spin.value() + 1)
@@ -1538,7 +1623,41 @@ class ClipAnnotator(QMainWindow):
         elif k == Qt.Key_Down:
             r = min(len(self.actions) - 1, self.act_list.currentRow() + 1)
             self.act_list.setCurrentRow(r)
+        # 1-7: switch camera
+        elif k in (Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4,
+                   Qt.Key_5, Qt.Key_6, Qt.Key_7):
+            idx = k - Qt.Key_1
+            if idx < self.cam_combo.count():
+                self.cam_combo.setCurrentIndex(idx)
+        # Home/End: jump to clip start/end
+        elif k == Qt.Key_Home:
+            self.cur_frame = self.clip_start
+            self._read_frame(self.cur_frame)
+            self.slider.setValue(self.cur_frame)
+        elif k == Qt.Key_End:
+            self.cur_frame = self.clip_end
+            self._read_frame(self.cur_frame)
+            self.slider.setValue(self.cur_frame)
+        # Tab: toggle Edit Mode
+        elif k == Qt.Key_Tab:
+            self.edit_cb.setChecked(not self.edit_cb.isChecked())
+        # K: add keyframe
+        elif k == Qt.Key_K:
+            self._add_keyframe()
+        # R: reset zoom/pan
+        elif k == Qt.Key_R and not (mods & Qt.ControlModifier):
+            self.vid_lbl.reset_view()
+            self._show_frame()
         else: super().keyPressEvent(event)
+
+    def _step_frames(self, n: int):
+        """Step forward/backward by n frames."""
+        if self.playing:
+            self._toggle_play()
+        nf = max(self.clip_start, min(self.clip_end, self.cur_frame + n))
+        self.cur_frame = nf
+        self._read_frame(nf)
+        self.slider.setValue(nf)
 
     # =======================================================================
     #  Export
@@ -1869,9 +1988,12 @@ class ClipAnnotator(QMainWindow):
 
     def closeEvent(self, event):
         if self._pts3d_dirty:
+            ckpt_msg = ""
+            if self._checkpoint_dir:
+                ckpt_msg = f"\n\nAuto-checkpoint available at:\n{self._checkpoint_dir}"
             reply = QMessageBox.question(
                 self, "Unsaved Edits",
-                "You have unsaved 3D point edits. Close without saving?",
+                f"You have unsaved 3D point edits. Close without saving?{ckpt_msg}",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply != QMessageBox.Yes:
                 event.ignore()
