@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QListWidget,
     QFileDialog, QSlider, QSpinBox, QComboBox, QCheckBox,
     QProgressDialog, QMessageBox, QGroupBox, QFormLayout, QSizePolicy,
-    QInputDialog, QMenu, QToolTip,
+    QInputDialog, QMenu, QToolTip, QScrollArea, QSplitter,
 )
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import Qt, QTimer, QCoreApplication
@@ -142,8 +142,11 @@ class ClipAnnotator(QMainWindow):
         root = QWidget(); self.setCentralWidget(root)
         hl = QHBoxLayout(root); hl.setContentsMargins(4, 4, 4, 4)
 
+        splitter = QSplitter(Qt.Horizontal)
+
         # ---- LEFT panel ----
-        left = QWidget(); left.setFixedWidth(310)
+        left = QWidget()
+        left.setMinimumWidth(250); left.setMaximumWidth(400)
         lv = QVBoxLayout(left); lv.setContentsMargins(0, 0, 0, 0)
 
         sg = QGroupBox("Sources"); sf = QFormLayout(sg)
@@ -169,7 +172,7 @@ class ClipAnnotator(QMainWindow):
         self.act_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.act_list.customContextMenuRequested.connect(self._act_context_menu)
         lv.addWidget(self.act_list)
-        hl.addWidget(left)
+        splitter.addWidget(left)
 
         # ---- CENTER panel ----
         center = QWidget(); cvl = QVBoxLayout(center); cvl.setContentsMargins(0, 0, 0, 0)
@@ -200,11 +203,16 @@ class ClipAnnotator(QMainWindow):
         self.zoom_lbl.setStyleSheet("font-size:11px; color:#888; padding:0 4px;")
         br.addWidget(self.zoom_lbl)
         cvl.addLayout(br)
-        hl.addWidget(center, stretch=1)
+        splitter.addWidget(center)
 
-        # ---- RIGHT panel ----
-        right = QWidget(); right.setFixedWidth(280)
-        rv = QVBoxLayout(right); rv.setContentsMargins(0, 0, 0, 0)
+        # ---- RIGHT panel (scrollable) ----
+        right_inner = QWidget()
+        rv = QVBoxLayout(right_inner); rv.setContentsMargins(0, 0, 0, 0)
+        right_scroll = QScrollArea()
+        right_scroll.setWidget(right_inner)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setMinimumWidth(250); right_scroll.setMaximumWidth(400)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         cg = QGroupBox("Camera"); cf = QFormLayout(cg)
         self.cam_combo = QComboBox()
@@ -405,7 +413,14 @@ class ClipAnnotator(QMainWindow):
         rv.addWidget(self.help_btn)
 
         rv.addStretch()
-        hl.addWidget(right)
+        splitter.addWidget(right_scroll)
+
+        # Set initial splitter proportions (left:center:right ~ 310:flex:280)
+        splitter.setStretchFactor(0, 0)  # left: don't stretch
+        splitter.setStretchFactor(1, 1)  # center: stretch
+        splitter.setStretchFactor(2, 0)  # right: don't stretch
+        splitter.setSizes([310, 800, 280])
+        hl.addWidget(splitter)
         self.statusBar().showMessage(
             "Space=Play  A/D=Prev/Next  Shift+A/D=±5  Q/E=-/+1s  W/S=Offset  "
             "1-7=Camera  Home/End=ClipEdge  Tab=EditMode  K=Keyframe  Ctrl+Scroll=Zoom")
