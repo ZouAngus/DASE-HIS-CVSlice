@@ -1205,7 +1205,7 @@ class ClipAnnotator(QMainWindow):
                 vf = self.vfps if self.vfps > 0 else 30.0
                 t = val / vf
                 tip = f"Frame {val}  ({fmt_time(t)})"
-                pos = event.globalPos() if hasattr(event, 'globalPos') else event.globalPosition().toPoint()
+                pos = obj.mapToGlobal(event.pos())
                 QToolTip.showText(pos, tip, self.slider)
         return super().eventFilter(obj, event)
 
