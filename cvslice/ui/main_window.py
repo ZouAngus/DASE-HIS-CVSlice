@@ -93,7 +93,7 @@ class ClipAnnotator(QMainWindow):
 
         # Per-camera view offset: {scene_name: {cam_name: int}}
         self._view_offsets: dict[str, dict[str, int]] = {}
-        self._offset_mode = "skeleton"  # "skeleton" (default/legacy) or "video"
+        self._offset_mode = "video"  # "skeleton" (legacy) or "video" (default)
 
         # All-joints keyframe state
         self._keyframes: list[int] = []  # sorted pts3d frame indices for keyframes
@@ -679,7 +679,7 @@ class ClipAnnotator(QMainWindow):
             if saved_vo:
                 self._view_offsets[scene_name] = dict(saved_vo)
             # Load offset mode (default "skeleton" for legacy compatibility)
-            self._offset_mode = saved.get("offset_mode", "skeleton")
+            self._offset_mode = saved.get("offset_mode", "video")
 
         self._suppress_spin = True
         self.scene_off_spin.setValue(self.scene_offset)
