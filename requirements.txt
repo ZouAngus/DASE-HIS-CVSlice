@@ -1,0 +1,6 @@
+numpy
+pandas
+opencv-python
+PyQt5
+openpyxl
+scipy       # optional: enables cubic spline interpolation for short NaN gaps
