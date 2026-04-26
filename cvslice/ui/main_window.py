@@ -2047,6 +2047,11 @@ class ClipAnnotator(QMainWindow):
         for ai in indices:
             a = self.actions[ai]
             rep = reps[ai]
+            if self.auto_pad_cb.isChecked():
+                pre_pad, post_pad, min_off, max_off = self._compute_auto_padding(ai, export_cams)
+                lines.append(f"  [padding] {self._make_action_tag(a)} rep{rep}: auto pre={pre_pad}, post={post_pad} (minOff={min_off}, maxOff={max_off})")
+            else:
+                lines.append(f"  [padding] {self._make_action_tag(a)} rep{rep}: manual pre={self.pre_pad_spin.value()}, post={self.post_pad_spin.value()}")
             for cn in export_cams:
                 stem = self._build_export_stem(actor_id, self.cur_scene, cn, a, rep)
                 lines.append(f"  {stem}.mp4")
