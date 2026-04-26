@@ -256,14 +256,23 @@ class ClipAnnotator(QMainWindow):
         rv.addWidget(sg)
 
         pg = QGroupBox("Export Padding"); pf = QFormLayout(pg)
+        self.auto_pad_cb = QCheckBox("Auto from offsets")
+        self.auto_pad_cb.setChecked(True)
+        self.auto_pad_cb.setToolTip("Automatically expand the export window based on the min/max total video offsets across views.")
+        self.auto_pad_cb.stateChanged.connect(self._update_padding_ui)
         self.pre_pad_spin = QSpinBox(); self.pre_pad_spin.setRange(0, 50000)
         self.pre_pad_spin.setValue(8)
         self.pre_pad_spin.setToolTip("Extra frames kept before the action for every exported view.")
         self.post_pad_spin = QSpinBox(); self.post_pad_spin.setRange(0, 50000)
         self.post_pad_spin.setValue(8)
         self.post_pad_spin.setToolTip("Extra frames kept after the action for every exported view.")
+        self.pad_info_lbl = QLabel("")
+        self.pad_info_lbl.setWordWrap(True)
+        self.pad_info_lbl.setStyleSheet("font-size:11px; color:#666;")
+        pf.addRow(self.auto_pad_cb)
         pf.addRow("Pre:", self.pre_pad_spin)
         pf.addRow("Post:", self.post_pad_spin)
+        pf.addRow(self.pad_info_lbl)
         rv.addWidget(pg)
 
         ag = QGroupBox("Action Override"); af = QFormLayout(ag)
@@ -990,6 +999,7 @@ class ClipAnnotator(QMainWindow):
         self.view_off_spin.setValue(self._get_view_offset(row))
         self._suppress_spin = False
         self.slider.setRange(s, e)
+        self._update_padding_ui()
         if offset_delta:
             # Offset changes should not move the clip window. Keep the current
             # raw video frame if possible, only clamp back into the clip range.
@@ -1022,6 +1032,7 @@ class ClipAnnotator(QMainWindow):
         self.overrides.setdefault(self.cur_act, {})["offset"] = val
         new_off = self._get_total_video_off()
         self._on_act_sel(self.cur_act, offset_delta=new_off - old_off)
+        self._update_padding_ui()
         self._auto_save()
 
     def _on_scene_off(self, val):
@@ -1032,6 +1043,7 @@ class ClipAnnotator(QMainWindow):
             self._on_act_sel(self.cur_act, offset_delta=new_off - old_off)
         else:
             self._show_frame()
+        self._update_padding_ui()
         self._auto_save()
 
     def _on_view_off(self, val):
@@ -1045,6 +1057,7 @@ class ClipAnnotator(QMainWindow):
         cam_dict[str(self.cur_act)] = val
         new_off = self._get_total_video_off()
         self._on_act_sel(self.cur_act, offset_delta=new_off - old_off)
+        self._update_padding_ui()
         self._auto_save()
 
     def _get_view_offset(self, action_row: int | None = None) -> int:
@@ -1093,7 +1106,42 @@ class ClipAnnotator(QMainWindow):
         if not self.cur_scene: return
         self._skeleton_offset[self.cur_scene] = val
         self._show_frame()
+        self._update_padding_ui()
         self._auto_save()
+
+    def _compute_auto_padding(self, action_row: int | None = None, cams: list[str] | None = None):
+        """Auto padding from the min/max total video offsets across views."""
+        row = self.cur_act if action_row is None else action_row
+        if row < 0:
+            return 0, 0, 0, 0
+        cam_list = cams if cams else (self.avail_cams if self.avail_cams else ([self.active_cam] if self.active_cam else []))
+        base_off = self.scene_offset + self._get_effective_act_offset(row)
+        offs = []
+        for cn in cam_list:
+            if not cn or cn == "(no cameras)":
+                continue
+            offs.append(base_off + self._get_view_offset_for(self.cur_scene, cn, row))
+        if not offs:
+            offs = [base_off]
+        min_off = min(offs)
+        max_off = max(offs)
+        margin = 3
+        pre = max(0, -min_off) + margin
+        post = max(0, max_off) + margin
+        return pre, post, min_off, max_off
+
+    def _update_padding_ui(self, *_args):
+        auto_on = self.auto_pad_cb.isChecked()
+        self.pre_pad_spin.setEnabled(not auto_on)
+        self.post_pad_spin.setEnabled(not auto_on)
+        if auto_on:
+            pre, post, min_off, max_off = self._compute_auto_padding()
+            self.pre_pad_spin.setValue(pre)
+            self.post_pad_spin.setValue(post)
+            self.pad_info_lbl.setText(
+                f"Auto padding from total offsets: min {min_off}, max {max_off} → pre {pre}, post {post}")
+        else:
+            self.pad_info_lbl.setText("Manual padding override.")
 
     def _show_sync_help(self):
         """Show explanation of the offset types."""
@@ -1109,8 +1157,8 @@ class ClipAnnotator(QMainWindow):
             "<p><b>总视频偏移 = Scene + Action + View</b></p>"
             "<p><b>导出时</b>，每个视角都会按自己的总视频偏移去平移裁切窗口，"
             "这样所有导出的 MP4 第 k 帧都对应同一个动作时刻，也能共用一份 CSV 骨架。</p>"
-            "<p><b>Export Padding</b> 会在动作前后额外保留若干帧，"
-            "用来避免 offset 调整后动作头尾看起来被切掉。</p>"
+            "<p><b>Export Padding</b> 默认会根据当前 action 各视角的总视频偏移自动计算，"
+            "保证偏移最大的视角也不容易把动作头尾裁掉；需要时也可以手动覆盖。</p>"
             "<p><b>Skeleton Offset</b> 只调整骨架读取时间轴，通常不需要改；"
             "绝大多数同步问题优先改 Video Offset，不要先碰 Skeleton Offset。</p>"
             "<p><b>建议顺序：</b>先调 Scene → 再调 Action → 最后用 View 微调单个视角。</p>"
@@ -2081,8 +2129,6 @@ class ClipAnnotator(QMainWindow):
 
         # --- Save offsets.json (all actions in one file) ---
         import json as _json
-        pre_pad = self.pre_pad_spin.value()
-        post_pad = self.post_pad_spin.value()
         all_offsets = []
         for ai in indices:
             a = self.actions[ai]
@@ -2091,6 +2137,8 @@ class ClipAnnotator(QMainWindow):
             sf = ov.get("start", a["start"])
             ef = ov.get("end", a["end"])
             total_off = self.scene_offset + self._get_effective_act_offset(ai)
+            pad_cams = export_cams if export_cams else self.avail_cams
+            pad_pre, pad_post, _, _ = self._compute_auto_padding(ai, pad_cams) if self.auto_pad_cb.isChecked() else (self.pre_pad_spin.value(), self.post_pad_spin.value(), 0, 0)
             all_offsets.append({
                 "action": self._make_action_tag(a),
                 "rep": rep,
@@ -2100,8 +2148,8 @@ class ClipAnnotator(QMainWindow):
                 "effective_offset": total_off,
                 "raw_clip_start": sf,
                 "raw_clip_end": ef,
-                "pre_padding": pre_pad,
-                "post_padding": post_pad,
+                "pre_padding": pad_pre,
+                "post_padding": pad_post,
                 "view_offsets": {cn: self._get_view_offset_for(
                     self.cur_scene, cn, ai) for cn in self.avail_cams},
             })
@@ -2109,8 +2157,7 @@ class ClipAnnotator(QMainWindow):
             "actor_id": actor_id,
             "scene": self.cur_scene,
             "skeleton_offset": self._skeleton_offset.get(self.cur_scene, 0),
-            "pre_padding": pre_pad,
-            "post_padding": post_pad,
+            "auto_padding": self.auto_pad_cb.isChecked(),
             "actions": all_offsets,
         }
         with open(os.path.join(act_dir, "offsets.json"), "w") as f:
@@ -2141,6 +2188,7 @@ class ClipAnnotator(QMainWindow):
             raw_ef = ov.get("end", a["end"])
             total_off = self.scene_offset + self._get_effective_act_offset(ai)
             act_tag = self._make_action_tag(a)
+            pre_pad, post_pad, _, _ = self._compute_auto_padding(ai, export_cams) if self.auto_pad_cb.isChecked() else (self.pre_pad_spin.value(), self.post_pad_spin.value(), 0, 0)
             base_sf = raw_sf - pre_pad
             base_ef = raw_ef + post_pad
             export_skel_off = self._skeleton_offset.get(self.cur_scene, 0)
