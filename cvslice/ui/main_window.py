@@ -866,20 +866,28 @@ class ClipAnnotator(QMainWindow):
     #  Frame cache
     # =======================================================================
     def _read_frame(self, frame_idx):
-        if frame_idx == self._cached_frame_idx and self._cached_frame is not None:
+        """Read video frame at the given canonical timeline position.
+        
+        frame_idx is on the canonical timeline. We apply the total video offset
+        to find the actual source frame in the raw video.
+        """
+        # Map canonical frame to source video frame
+        source_frame = frame_idx + self._get_total_video_off()
+        
+        if source_frame == self._cached_frame_idx and self._cached_frame is not None:
             return self._cached_frame
         if not self.cap or not self.cap.isOpened():
             if self._cached_frame is None:
                 self._cached_frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-            self._cached_frame_idx = frame_idx
+            self._cached_frame_idx = source_frame
             return self._cached_frame
-        if frame_idx == self._cached_frame_idx + 1:
+        if source_frame == self._cached_frame_idx + 1:
             ret, frame = self.cap.read()
         else:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, source_frame)
             ret, frame = self.cap.read()
         if ret:
-            self._cached_frame_idx = frame_idx
+            self._cached_frame_idx = source_frame
             self._cached_frame = frame
             return self._cached_frame
         return None
@@ -1257,10 +1265,9 @@ class ClipAnnotator(QMainWindow):
         self._drag_pidx = None
         if need_skel:
             intr, extr = self.calibs[self.active_cam]
-            # Strip video offset so skeleton mapping is independent
-            raw_vf = self.cur_frame - self._get_total_video_off()
+            # cur_frame is on the canonical timeline; skeleton maps directly
             skel_off = self._skeleton_offset.get(self.cur_scene, 0)
-            pidx = v2p(raw_vf, self.vfps, self.pfps,
+            pidx = v2p(self.cur_frame, self.vfps, self.pfps,
                        self.pts3d.shape[0], skel_off)
             pts = self.pts3d[pidx]
             if self.pts3d_valid is not None and self.pts3d_valid[pidx]:
