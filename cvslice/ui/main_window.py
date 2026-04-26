@@ -824,12 +824,6 @@ class ClipAnnotator(QMainWindow):
         return None
 
     def _switch_cam(self, cam_name):
-        # Remember current pidx before switching (so skeleton stays anchored)
-        # In the new model, skeleton offset is per-scene (not per-camera),
-        # so the same cur_frame gives the same pidx. We only need to adjust
-        # cur_frame if the clip range shifts due to view offset change.
-        old_view_off = self._get_view_offset() if self.cur_act >= 0 else 0
-
         if self.cap: self.cap.release(); self.cap = None
         self.active_cam = cam_name
         self._cached_frame_idx = -1
@@ -842,22 +836,11 @@ class ClipAnnotator(QMainWindow):
                 self.vfps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
                 self.vtotal = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 self._estimate_pfps()
-        # Load view offset for this camera
+        # Load view offset for this camera. Camera switches should not move
+        # the raw clip window; view offset only changes skeleton mapping.
         self._suppress_spin = True
         self.view_off_spin.setValue(self._get_view_offset())
         self._suppress_spin = False
-
-        # Anchor skeleton: adjust cur_frame by view offset difference
-        # so the same skeleton frame is displayed after camera switch.
-        new_view_off = self._get_view_offset() if self.cur_act >= 0 else 0
-        delta = new_view_off - old_view_off
-        if delta != 0:
-            new_vframe = self.cur_frame + delta
-            new_vframe = max(self.clip_start, min(self.clip_end, new_vframe))
-            self.cur_frame = new_vframe
-            self.slider.blockSignals(True)
-            self.slider.setValue(new_vframe)
-            self.slider.blockSignals(False)
 
         self._read_frame(self.cur_frame)
         self._show_frame()
@@ -982,15 +965,14 @@ class ClipAnnotator(QMainWindow):
         ov = self.overrides.get(row, {})
         raw_s = ov.get("start", a["start"])
         raw_e = ov.get("end", a["end"])
-        # Video offsets shift the displayed clip range only.
-        # Action override spinboxes stay in raw video-frame coordinates,
-        # otherwise changing offsets will corrupt the saved override values.
-        total_off = self.scene_offset + self._get_effective_act_offset(row) + self._get_view_offset(row)
-        s = raw_s + total_off
-        e = raw_e + total_off
-        s = max(0, s)
+        # Clip boundaries stay in raw video-frame coordinates.
+        # Video offsets only affect video↔skeleton mapping, not which
+        # original frames belong to the action clip.
+        s = max(0, raw_s)
         if self.vtotal > 0:
-            e = min(self.vtotal - 1, e)
+            e = min(self.vtotal - 1, raw_e)
+        else:
+            e = raw_e
         e = max(s, e)
         self.clip_start = s; self.clip_end = e
         self._suppress_spin = True
@@ -1001,9 +983,9 @@ class ClipAnnotator(QMainWindow):
         self._suppress_spin = False
         self.slider.setRange(s, e)
         if offset_delta:
-            # Shift cur_frame by the offset change so the skeleton stays put
-            # while the video slides underneath.
-            self.cur_frame = max(s, min(e, self.cur_frame + offset_delta))
+            # Offset changes should not move the clip window. Keep the current
+            # raw video frame if possible, only clamp back into the clip range.
+            self.cur_frame = max(s, min(e, self.cur_frame))
         else:
             self.cur_frame = s
         self.slider.setValue(self.cur_frame)
@@ -2105,6 +2087,8 @@ class ClipAnnotator(QMainWindow):
                 "end_frame": ef,
                 "scene_offset": self.scene_offset,
                 "effective_offset": total_off,
+                "raw_clip_start": sf,
+                "raw_clip_end": ef,
                 "view_offsets": {cn: self._get_view_offset_for(
                     self.cur_scene, cn, ai) for cn in self.avail_cams},
             })
@@ -2142,12 +2126,12 @@ class ClipAnnotator(QMainWindow):
             raw_ef = ov.get("end", a["end"])
             total_off = self.scene_offset + self._get_effective_act_offset(ai)
             act_tag = self._make_action_tag(a)
-            # Video offsets always shift clip range
-            sf = raw_sf + total_off
-            ef = raw_ef + total_off
-            sf = max(0, sf)
+            # Export the same raw video clip window regardless of video offset.
+            sf = max(0, raw_sf)
             if self.vtotal > 0:
-                ef = min(self.vtotal - 1, ef)
+                ef = min(self.vtotal - 1, raw_ef)
+            else:
+                ef = raw_ef
             ef = max(sf, ef)
             export_skel_off = self._skeleton_offset.get(self.cur_scene, 0)
 
@@ -2172,10 +2156,10 @@ class ClipAnnotator(QMainWindow):
 
                 cam_view_off = self._get_view_offset_for(self.cur_scene, cn, ai)
 
-                # View offset shifts the video clip range
-                cam_sf = sf + cam_view_off
-                cam_ef = ef + cam_view_off
-                # Total video offset for this camera (for stripping from frame idx)
+                # Keep the raw video clip window fixed. View offset only changes
+                # which skeleton frame is mapped onto each video frame.
+                cam_sf = sf
+                cam_ef = ef
                 cam_total_vid_off = total_off + cam_view_off
                 cam_skel_off = export_skel_off
 
