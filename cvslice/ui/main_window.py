@@ -980,20 +980,22 @@ class ClipAnnotator(QMainWindow):
         self.cur_act = row
         a = self.actions[row]
         ov = self.overrides.get(row, {})
-        s = ov.get("start", a["start"])
-        e = ov.get("end", a["end"])
-        # Video offsets always shift clip range
+        raw_s = ov.get("start", a["start"])
+        raw_e = ov.get("end", a["end"])
+        # Video offsets shift the displayed clip range only.
+        # Action override spinboxes stay in raw video-frame coordinates,
+        # otherwise changing offsets will corrupt the saved override values.
         total_off = self.scene_offset + self._get_effective_act_offset(row) + self._get_view_offset(row)
-        s += total_off
-        e += total_off
+        s = raw_s + total_off
+        e = raw_e + total_off
         s = max(0, s)
         if self.vtotal > 0:
             e = min(self.vtotal - 1, e)
         e = max(s, e)
         self.clip_start = s; self.clip_end = e
         self._suppress_spin = True
-        self.start_spin.setValue(s)
-        self.end_spin.setValue(e)
+        self.start_spin.setValue(raw_s)
+        self.end_spin.setValue(raw_e)
         self.act_off_spin.setValue(self._get_effective_act_offset(row))
         self.view_off_spin.setValue(self._get_view_offset(row))
         self._suppress_spin = False
@@ -1011,16 +1013,18 @@ class ClipAnnotator(QMainWindow):
     def _on_start_ov(self, val):
         if self._suppress_spin or self.cur_act < 0: return
         ov = self.overrides.setdefault(self.cur_act, {})
-        ov["start"] = val; self.clip_start = val
-        self.slider.setRange(val, self.clip_end)
-        self._update_act_label(); self._auto_save()
+        ov["start"] = val
+        self._update_act_label()
+        self._on_act_sel(self.cur_act)
+        self._auto_save()
 
     def _on_end_ov(self, val):
         if self._suppress_spin or self.cur_act < 0: return
         ov = self.overrides.setdefault(self.cur_act, {})
-        ov["end"] = val; self.clip_end = val
-        self.slider.setRange(self.clip_start, val)
-        self._update_act_label(); self._auto_save()
+        ov["end"] = val
+        self._update_act_label()
+        self._on_act_sel(self.cur_act)
+        self._auto_save()
 
     def _on_act_off(self, val):
         if self._suppress_spin or self.cur_act < 0: return
