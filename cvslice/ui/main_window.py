@@ -255,6 +255,17 @@ class ClipAnnotator(QMainWindow):
         sf2.addRow("Offset:", self.skel_off_spin)
         rv.addWidget(sg)
 
+        pg = QGroupBox("Export Padding"); pf = QFormLayout(pg)
+        self.pre_pad_spin = QSpinBox(); self.pre_pad_spin.setRange(0, 50000)
+        self.pre_pad_spin.setValue(8)
+        self.pre_pad_spin.setToolTip("Extra frames kept before the action for every exported view.")
+        self.post_pad_spin = QSpinBox(); self.post_pad_spin.setRange(0, 50000)
+        self.post_pad_spin.setValue(8)
+        self.post_pad_spin.setToolTip("Extra frames kept after the action for every exported view.")
+        pf.addRow("Pre:", self.pre_pad_spin)
+        pf.addRow("Post:", self.post_pad_spin)
+        rv.addWidget(pg)
+
         ag = QGroupBox("Action Override"); af = QFormLayout(ag)
         self.start_spin = QSpinBox(); self.start_spin.setRange(0, 9999999)
         self.start_spin.setAttribute(Qt.WA_InputMethodEnabled, False)
@@ -1088,20 +1099,21 @@ class ClipAnnotator(QMainWindow):
         """Show explanation of the offset types."""
         text = (
             "<h3>Offset 说明</h3>"
-            "<p><b>Video Offset</b> — 调整视频帧的裁剪范围：</p>"
+            "<p><b>核心原则：</b>系统只有一条动作时间轴。Action Override 定义动作在参考视频帧上的标准边界；"
+            "每个视角的 Video Offset 表示该视角相对这条时间轴要平移多少帧。</p>"
             "<ul>"
-            "<li><b>Scene</b> — 场景级别的全局偏移，影响该场景下所有 action 和所有相机视角。</li>"
-            "<li><b>Action</b> — 单个 action 的偏移。"
-            "未设置的 action 会继承前一个 action 的值。</li>"
-            "<li><b>View</b> — 当前相机视角 + 当前 action 的视频帧偏移。"
-            "每个 action 和相机组合可以有独立的 View offset。"
-            "当不同相机的视频录制起始时间不同时使用。</li>"
+            "<li><b>Scene</b>：整个场景共用的帧偏移。</li>"
+            "<li><b>Action</b>：当前 action 的帧偏移；未设置时继承前一个 action。</li>"
+            "<li><b>View</b>：当前相机视角的额外帧偏移，用来修正单个视角录制起点不同。</li>"
             "</ul>"
-            "<p><b>视频总偏移 = Scene + Action + View</b></p>"
-            "<p><b>Skeleton Offset</b> — 调整骨架数据的读取帧偏移。"
-            "通常不需要调整，仅在 3D 数据与视频帧率不匹配时使用。</p>"
-            "<p>调整顺序建议：先调 Scene 对齐大部分视角，"
-            "再用 View 微调个别视角的偏差。</p>"
+            "<p><b>总视频偏移 = Scene + Action + View</b></p>"
+            "<p><b>导出时</b>，每个视角都会按自己的总视频偏移去平移裁切窗口，"
+            "这样所有导出的 MP4 第 k 帧都对应同一个动作时刻，也能共用一份 CSV 骨架。</p>"
+            "<p><b>Export Padding</b> 会在动作前后额外保留若干帧，"
+            "用来避免 offset 调整后动作头尾看起来被切掉。</p>"
+            "<p><b>Skeleton Offset</b> 只调整骨架读取时间轴，通常不需要改；"
+            "绝大多数同步问题优先改 Video Offset，不要先碰 Skeleton Offset。</p>"
+            "<p><b>建议顺序：</b>先调 Scene → 再调 Action → 最后用 View 微调单个视角。</p>"
         )
         QMessageBox.information(self, "Offset 说明", text)
 
@@ -2069,6 +2081,8 @@ class ClipAnnotator(QMainWindow):
 
         # --- Save offsets.json (all actions in one file) ---
         import json as _json
+        pre_pad = self.pre_pad_spin.value()
+        post_pad = self.post_pad_spin.value()
         all_offsets = []
         for ai in indices:
             a = self.actions[ai]
@@ -2086,6 +2100,8 @@ class ClipAnnotator(QMainWindow):
                 "effective_offset": total_off,
                 "raw_clip_start": sf,
                 "raw_clip_end": ef,
+                "pre_padding": pre_pad,
+                "post_padding": post_pad,
                 "view_offsets": {cn: self._get_view_offset_for(
                     self.cur_scene, cn, ai) for cn in self.avail_cams},
             })
@@ -2093,6 +2109,8 @@ class ClipAnnotator(QMainWindow):
             "actor_id": actor_id,
             "scene": self.cur_scene,
             "skeleton_offset": self._skeleton_offset.get(self.cur_scene, 0),
+            "pre_padding": pre_pad,
+            "post_padding": post_pad,
             "actions": all_offsets,
         }
         with open(os.path.join(act_dir, "offsets.json"), "w") as f:
@@ -2123,20 +2141,16 @@ class ClipAnnotator(QMainWindow):
             raw_ef = ov.get("end", a["end"])
             total_off = self.scene_offset + self._get_effective_act_offset(ai)
             act_tag = self._make_action_tag(a)
-            # Export the same raw video clip window regardless of video offset.
-            sf = max(0, raw_sf)
-            if self.vtotal > 0:
-                ef = min(self.vtotal - 1, raw_ef)
-            else:
-                ef = raw_ef
-            ef = max(sf, ef)
+            base_sf = raw_sf - pre_pad
+            base_ef = raw_ef + post_pad
             export_skel_off = self._skeleton_offset.get(self.cur_scene, 0)
 
             # --- Export 3D points CSV ---
-            # Use raw (un-offset) frame range for skeleton mapping
+            # Single shared CSV stays on the canonical action timeline
+            # (raw action boundary + shared padding).
             if self.pts3d is not None:
-                pi_s = v2p(raw_sf, self.vfps, self.pfps, self.pts3d.shape[0], export_skel_off)
-                pi_e = v2p(raw_ef, self.vfps, self.pfps, self.pts3d.shape[0], export_skel_off)
+                pi_s = v2p(base_sf, self.vfps, self.pfps, self.pts3d.shape[0], export_skel_off)
+                pi_e = v2p(base_ef, self.vfps, self.pfps, self.pts3d.shape[0], export_skel_off)
                 sl = self.pts3d[pi_s:pi_e + 1]
                 nj = sl.shape[1]
                 cols = []
@@ -2153,11 +2167,11 @@ class ClipAnnotator(QMainWindow):
 
                 cam_view_off = self._get_view_offset_for(self.cur_scene, cn, ai)
 
-                # Keep the raw video clip window fixed. View offset only changes
-                # which skeleton frame is mapped onto each video frame.
-                cam_sf = sf
-                cam_ef = ef
+                # Every exported view is shifted by its own total video offset so
+                # all output MP4s share one action timeline and match the single CSV.
                 cam_total_vid_off = total_off + cam_view_off
+                cam_sf = base_sf + cam_total_vid_off
+                cam_ef = base_ef + cam_total_vid_off
                 cam_skel_off = export_skel_off
 
                 if cn == "virtual":
@@ -2175,11 +2189,7 @@ class ClipAnnotator(QMainWindow):
                 fps = cap2.get(cv2.CAP_PROP_FPS) or 30.0
                 w = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
                 h = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                # Clamp to valid video range
-                cam_sf = max(0, cam_sf)
-                if cam_vtotal > 0:
-                    cam_ef = min(cam_vtotal - 1, cam_ef)
-                cam_ef = max(cam_sf, cam_ef)
+                out_len = max(1, base_ef - base_sf + 1)
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
                 # --- Raw video (no overlays) ---
@@ -2193,18 +2203,26 @@ class ClipAnnotator(QMainWindow):
                 chk_writer = cv2.VideoWriter(chk_path, fourcc, fps, (w, h))
 
                 ie = self.calibs.get(cn)
-                cap2.set(cv2.CAP_PROP_POS_FRAMES, cam_sf)
-                for fi in range(cam_sf, cam_ef + 1):
-                    ret, frm = cap2.read()
-                    if not ret: break
-                    # Write raw frame
+                fallback = None
+                for step in range(out_len):
+                    fi = cam_sf + step
+                    if 0 <= fi < cam_vtotal:
+                        cap2.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                        ret, frm = cap2.read()
+                        if not ret:
+                            frm = fallback.copy() if fallback is not None else np.zeros((h, w, 3), dtype=np.uint8)
+                        else:
+                            fallback = frm.copy()
+                    else:
+                        frm = fallback.copy() if fallback is not None else np.zeros((h, w, 3), dtype=np.uint8)
+                    # Write raw/output frame (with pad if source goes out of range)
                     writer.write(frm)
                     # Build overlay copy for check video
                     chk = frm.copy()
+                    canonical_fi = base_sf + step
                     if self.pts3d is not None and ie:
                         intr, extr = ie
-                        raw_fi = fi - cam_total_vid_off
-                        pidx = v2p(raw_fi, fps, self.pfps,
+                        pidx = v2p(canonical_fi, fps, self.pfps,
                                    self.pts3d.shape[0], cam_skel_off)
                         pts = self.pts3d[pidx]
                         if self.pts3d_valid is not None and self.pts3d_valid[pidx]:
@@ -2215,9 +2233,8 @@ class ClipAnnotator(QMainWindow):
                                 if self.pts3d_was_nan is not None:
                                     nan_mask = self.pts3d_was_nan[pidx]
                                 draw_skel_with_confidence(chk, proj, nan_mask)
-                    t = fi / fps
-                    raw_fi_info = fi - cam_total_vid_off
-                    cv2.putText(chk, f"{fmt_time(t)} F:{fi} P:{v2p(raw_fi_info, fps, self.pfps, self.pts3d.shape[0], cam_skel_off) if self.pts3d is not None else '?'}",
+                    t = max(0, fi) / fps
+                    cv2.putText(chk, f"srcF:{fi} canonF:{canonical_fi} P:{v2p(canonical_fi, fps, self.pfps, self.pts3d.shape[0], cam_skel_off) if self.pts3d is not None else '?'}",
                                 (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
                                 (255, 255, 255), 2)
                     chk_writer.write(chk)
@@ -2238,9 +2255,9 @@ class ClipAnnotator(QMainWindow):
         for fi in range(sf, ef + 1):
             frm = np.zeros((h, w, 3), dtype=np.uint8)
             if self.pts3d is not None and self.calibs:
+                canonical_fi = fi - vid_off
                 for cal_cam, (intr, extr) in self.calibs.items():
-                    raw_fi = fi - vid_off
-                    pidx = v2p(raw_fi, fps, self.pfps,
+                    pidx = v2p(canonical_fi, fps, self.pfps,
                                self.pts3d.shape[0], skel_off)
                     pts = self.pts3d[pidx]
                     if self.pts3d_valid is not None and self.pts3d_valid[pidx]:
@@ -2252,8 +2269,7 @@ class ClipAnnotator(QMainWindow):
                                 nan_mask = self.pts3d_was_nan[pidx]
                             draw_skel_with_confidence(frm, proj, nan_mask)
                     break
-            t = fi / fps
-            cv2.putText(frm, f"{fmt_time(t)} F:{fi}", (15, 35),
+            cv2.putText(frm, f"canonF:{fi - vid_off}", (15, 35),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
             writer.write(frm)
         writer.release()
