@@ -129,6 +129,7 @@ class ClipAnnotator(QMainWindow):
         fm.addAction("Load Calibration Folder...", self._load_cal)
         fm.addSeparator()
         fm.addAction("Save Offsets", self._save_current_annotations)
+        fm.addAction("Load Offsets from JSON...", self._load_offsets_from_json)
         fm.addAction("Save Edited 3D Points...", self._save_edited_csv)
         edm = mb.addMenu("Edit")
         edm.addAction("Undo Joint Move (Ctrl+Z)", self._undo_joint_edit)
@@ -813,6 +814,79 @@ class ClipAnnotator(QMainWindow):
             QMessageBox.information(
                 self, "Saved",
                 f"Offsets saved to:\n{annotations_path(self.xlsx_path)}")
+
+    def _load_offsets_from_json(self):
+        """Load offsets from a previously exported offsets.json file."""
+        from PyQt5.QtWidgets import QFileDialog
+        import json
+        
+        json_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Offsets JSON", "", "JSON Files (*.json)")
+        if not json_path:
+            return
+        
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Load skeleton offset
+            if 'skeleton_offset' in data and self.cur_scene:
+                self._skeleton_offset[self.cur_scene] = data['skeleton_offset']
+                self._suppress_spin = True
+                self.skel_off_spin.setValue(data['skeleton_offset'])
+                self._suppress_spin = False
+            
+            # Load actions
+            if 'actions' in data:
+                for act_data in data['actions']:
+                    action_name = act_data.get('action', '')
+                    rep = act_data.get('rep', 1)
+                    
+                    # Find matching row in action table
+                    row_idx = None
+                    for r in range(self.act_table.rowCount()):
+                        if (self.act_table.item(r, 0).text() == action_name and
+                            int(self.act_table.item(r, 1).text()) == rep):
+                            row_idx = r
+                            break
+                    
+                    if row_idx is None:
+                        continue
+                    
+                    # Load start/end frames
+                    if 'start_frame' in act_data:
+                        self.overrides.setdefault(row_idx, {})['start'] = act_data['start_frame']
+                    if 'end_frame' in act_data:
+                        self.overrides.setdefault(row_idx, {})['end'] = act_data['end_frame']
+                    
+                    # Load scene offset (action-level effective offset)
+                    if 'effective_offset' in act_data and self.cur_scene:
+                        # Store as action offset
+                        if self.cur_scene not in self._action_offsets:
+                            self._action_offsets[self.cur_scene] = {}
+                        self._action_offsets[self.cur_scene][str(row_idx)] = act_data['effective_offset']
+                    
+                    # Load view offsets
+                    if 'view_offsets' in act_data and self.cur_scene:
+                        for cam_name, offset_val in act_data['view_offsets'].items():
+                            if self.cur_scene not in self._view_offsets:
+                                self._view_offsets[self.cur_scene] = {}
+                            if cam_name not in self._view_offsets[self.cur_scene]:
+                                self._view_offsets[self.cur_scene][cam_name] = {}
+                            self._view_offsets[self.cur_scene][cam_name][str(row_idx)] = offset_val
+            
+            # Refresh UI
+            self._refresh_act_list()
+            self._show_frame()
+            
+            QMessageBox.information(
+                self, "Offsets Loaded",
+                f"Successfully loaded offsets from:\n{json_path}")
+        
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Load Failed",
+                f"Failed to load offsets:\n{str(e)}")
 
     def _estimate_pfps(self):
         if self.pts3d is not None and self.vtotal > 0 and self.vfps > 0:
