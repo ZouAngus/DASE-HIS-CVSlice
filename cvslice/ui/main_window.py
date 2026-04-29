@@ -842,11 +842,11 @@ class ClipAnnotator(QMainWindow):
                     action_name = act_data.get('action', '')
                     rep = act_data.get('rep', 1)
                     
-                    # Find matching row in action table
+                    # Find matching row in actions list
                     row_idx = None
-                    for r in range(self.act_table.rowCount()):
-                        if (self.act_table.item(r, 0).text() == action_name and
-                            int(self.act_table.item(r, 1).text()) == rep):
+                    for r, action in enumerate(self.actions):
+                        # Match by action name and rep number (stored in 'no' field)
+                        if action.get('action', '') == action_name and action.get('no', 1) == rep:
                             row_idx = r
                             break
                     
