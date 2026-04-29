@@ -836,52 +836,80 @@ class ClipAnnotator(QMainWindow):
                 self.skel_off_spin.setValue(data['skeleton_offset'])
                 self._suppress_spin = False
             
-            # Load actions
-            if 'actions' in data:
-                for act_data in data['actions']:
-                    action_name = act_data.get('action', '')
-                    rep = act_data.get('rep', 1)
-                    
-                    # Find matching row in actions list
-                    row_idx = None
-                    for r, action in enumerate(self.actions):
-                        # Match by action name and rep number (stored in 'no' field)
-                        if action.get('action', '') == action_name and action.get('no', 1) == rep:
-                            row_idx = r
-                            break
-                    
-                    if row_idx is None:
-                        continue
-                    
-                    # Load start/end frames
-                    if 'start_frame' in act_data:
-                        self.overrides.setdefault(row_idx, {})['start'] = act_data['start_frame']
-                    if 'end_frame' in act_data:
-                        self.overrides.setdefault(row_idx, {})['end'] = act_data['end_frame']
-                    
-                    # Load scene offset (action-level effective offset)
-                    if 'effective_offset' in act_data and self.cur_scene:
-                        # Store as action offset
-                        if self.cur_scene not in self._action_offsets:
-                            self._action_offsets[self.cur_scene] = {}
-                        self._action_offsets[self.cur_scene][str(row_idx)] = act_data['effective_offset']
-                    
-                    # Load view offsets
-                    if 'view_offsets' in act_data and self.cur_scene:
-                        for cam_name, offset_val in act_data['view_offsets'].items():
-                            if self.cur_scene not in self._view_offsets:
-                                self._view_offsets[self.cur_scene] = {}
-                            if cam_name not in self._view_offsets[self.cur_scene]:
-                                self._view_offsets[self.cur_scene][cam_name] = {}
-                            self._view_offsets[self.cur_scene][cam_name][str(row_idx)] = offset_val
+            # Load scene offset from first action entry (all actions share
+            # the same scene_offset in a single export).
+            scene_off = 0
+            action_list = data.get('actions', [])
+            if action_list:
+                scene_off = action_list[0].get('scene_offset', 0)
+            if self.cur_scene:
+                self.scene_offset = scene_off
+                self._suppress_spin = True
+                self.scene_off_spin.setValue(scene_off)
+                self._suppress_spin = False
+            
+            # Build tag→[(action_index, rep)] mapping using the same
+            # logic as _assign_reps so that matching is consistent with export.
+            all_indices = list(range(len(self.actions)))
+            tag_to_rows: dict[str, list[tuple[int, int]]] = {}  # tag -> [(ai, rep)]
+            rep_counts: dict[str, int] = {}
+            for ai in all_indices:
+                tag = self._make_action_tag(self.actions[ai])
+                rep = rep_counts.get(tag, 1)
+                tag_to_rows.setdefault(tag, []).append((ai, rep))
+                rep_counts[tag] = rep + 1
+            
+            # Load actions from JSON
+            for act_data in action_list:
+                action_tag = act_data.get('action', '')
+                json_rep = act_data.get('rep', 1)
+                
+                # Find matching row by action_tag + rep
+                row_idx = None
+                for ai, rep in tag_to_rows.get(action_tag, []):
+                    if rep == json_rep:
+                        row_idx = ai
+                        break
+                
+                if row_idx is None:
+                    continue
+                
+                # Load start/end frames
+                if 'start_frame' in act_data:
+                    self.overrides.setdefault(row_idx, {})['start'] = act_data['start_frame']
+                if 'end_frame' in act_data:
+                    self.overrides.setdefault(row_idx, {})['end'] = act_data['end_frame']
+                
+                # Recover action offset = effective_offset - scene_offset
+                if 'effective_offset' in act_data:
+                    act_off = act_data['effective_offset'] - scene_off
+                    self.overrides.setdefault(row_idx, {})["offset"] = act_off
+                
+                # Load view offsets
+                if 'view_offsets' in act_data and self.cur_scene:
+                    for cam_name, offset_val in act_data['view_offsets'].items():
+                        if self.cur_scene not in self._view_offsets:
+                            self._view_offsets[self.cur_scene] = {}
+                        if cam_name not in self._view_offsets[self.cur_scene]:
+                            self._view_offsets[self.cur_scene][cam_name] = {}
+                        self._view_offsets[self.cur_scene][cam_name][str(row_idx)] = offset_val
             
             # Refresh UI
             self._refresh_act_list()
+            if self.cur_act >= 0:
+                self._on_act_sel(self.cur_act)
             self._show_frame()
             
+            # Count how many JSON entries found a match
+            matched = 0
+            for ad in action_list:
+                tag = ad.get('action', '')
+                jr = ad.get('rep', 1)
+                if any(r == jr for _, r in tag_to_rows.get(tag, [])):
+                    matched += 1
             QMessageBox.information(
                 self, "Offsets Loaded",
-                f"Successfully loaded offsets from:\n{json_path}")
+                f"Loaded {matched}/{len(action_list)} actions from:\n{json_path}")
         
         except Exception as e:
             QMessageBox.critical(
