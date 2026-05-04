@@ -27,7 +27,15 @@ def main():
     font = QFont(chosen, 9)
     app.setFont(font)
 
-    win = ClipAnnotator()
+    # Optional: launch the standalone Skeleton Corrector window.
+    # Usage:  python main.py --correct [optional_folder_path]
+    if "--correct" in sys.argv:
+        from cvslice.ui.skeleton_corrector import SkeletonCorrector
+        idx = sys.argv.index("--correct")
+        folder = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
+        win = SkeletonCorrector(folder)
+    else:
+        win = ClipAnnotator()
     win.show()
     sys.exit(app.exec_())
 
