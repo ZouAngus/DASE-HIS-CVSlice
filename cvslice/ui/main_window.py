@@ -110,6 +110,9 @@ class ClipAnnotator(QMainWindow):
         # Undo stack cap
         self._UNDO_MAX = 200
 
+        # Track edited frames: {pidx: set of joint indices}
+        self._edited_frames: dict[int, set[int]] = {}
+
         self._build_ui()
         self.timer = QTimer()
         self.timer.timeout.connect(self._tick)
@@ -127,6 +130,8 @@ class ClipAnnotator(QMainWindow):
         fm.addAction("Load Excel...", self._load_xlsx)
         fm.addAction("Load Data Root Folder...", self._load_data_root)
         fm.addAction("Load Calibration Folder...", self._load_cal)
+        fm.addSeparator()
+        fm.addAction("Load from Exported Folder...", self._load_from_export)
         fm.addSeparator()
         fm.addAction("Save Offsets", self._save_current_annotations)
         fm.addAction("Load Offsets from JSON...", self._load_offsets_from_json)
@@ -452,6 +457,20 @@ class ClipAnnotator(QMainWindow):
 
         rv.addWidget(pg)
 
+        # ---- Edited Frames panel ----
+        efg = QGroupBox("Edited Frames")
+        efl = QVBoxLayout(efg)
+        self.edited_frames_list = QListWidget()
+        self.edited_frames_list.setMaximumHeight(120)
+        self.edited_frames_list.setToolTip("Frames with manual edits. Click to jump.")
+        self.edited_frames_list.itemClicked.connect(self._on_edited_frame_clicked)
+        efl.addWidget(self.edited_frames_list)
+        self.edited_frames_lbl = QLabel("No edits yet")
+        self.edited_frames_lbl.setStyleSheet("font-size:11px; color:#888;")
+        self.edited_frames_lbl.setWordWrap(True)
+        efl.addWidget(self.edited_frames_lbl)
+        rv.addWidget(efg)
+
         # ---- Help button ----
         self.help_btn = QPushButton("❓ Editing Guide")
         self.help_btn.setToolTip("Show how to use the 3D joint editing tools")
@@ -677,6 +696,138 @@ class ClipAnnotator(QMainWindow):
         self.statusBar().showMessage(
             f"Loaded calibration for {len(self.calibs)} cameras")
         self._show_frame()
+
+    def _load_from_export(self):
+        """Load data from an exported folder (offsets.json + CSV + videos)."""
+        folder = QFileDialog.getExistingDirectory(self, "Select Exported Folder")
+        if not folder:
+            return
+        
+        import json
+        offsets_path = os.path.join(folder, "offsets.json")
+        if not os.path.exists(offsets_path):
+            QMessageBox.warning(self, "Warning", 
+                "No offsets.json found in this folder.\n"
+                "Please select a folder exported by CVSlice.")
+            return
+        
+        try:
+            with open(offsets_path, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to load offsets.json:\n{e}")
+            return
+        
+        # Extract metadata
+        scene = doc.get("scene", "exported")
+        actions_data = doc.get("actions", [])
+        if not actions_data:
+            QMessageBox.warning(self, "Warning", "No actions found in offsets.json")
+            return
+        
+        # Load CSV (find first .csv in folder)
+        csv_path = None
+        for fn in os.listdir(folder):
+            if fn.endswith(".csv"):
+                csv_path = os.path.join(folder, fn)
+                break
+        
+        if not csv_path:
+            QMessageBox.warning(self, "Warning", "No CSV file found in exported folder")
+            return
+        
+        # Load 3D points
+        result = load_csv_as_pts3d(csv_path)
+        if result[0] is None:
+            QMessageBox.warning(self, "Error", "Failed to load CSV")
+            return
+        
+        self.pts3d, self.pts3d_valid, self.pts3d_was_nan = result
+        
+        # Load calibration if present
+        cal_folder = os.path.join(folder, "calibration")
+        if os.path.isdir(cal_folder):
+            self.cal_folder = cal_folder
+            self.calibs = load_all_calibrations(cal_folder)
+            self.lbl_cal.setText("(from export)")
+        
+        # Detect available cameras from video files
+        self.avail_cams = []
+        for cam_name in CAMERA_NAMES:
+            for fn in os.listdir(folder):
+                if cam_name in fn.lower() and fn.endswith(".mp4"):
+                    self.avail_cams.append(cam_name)
+                    break
+        
+        # Set up scene
+        self.cur_scene = scene
+        self.video_folder = folder
+        self.data_root = folder
+        
+        # Reconstruct actions from offsets.json
+        self.actions = []
+        for act_data in actions_data:
+            action_dict = {
+                "action": act_data.get("action", "unknown"),
+                "start": act_data.get("start_frame", 0),
+                "end": act_data.get("end_frame", 0),
+                "rep": act_data.get("rep", ""),
+                "no": len(self.actions) + 1,
+                "variant": "",
+            }
+            self.actions.append(action_dict)
+        
+        # Load offsets
+        self.scene_offset = doc.get("scene_offset", 0)
+        self._skeleton_offset[scene] = doc.get("skeleton_offset", 0)
+        
+        # Load view offsets
+        view_offsets_data = doc.get("actions", [])[0].get("view_offsets", {}) if actions_data else {}
+        if view_offsets_data:
+            self._view_offsets[scene] = {}
+            for cam, offset in view_offsets_data.items():
+                self._view_offsets[scene][cam] = {"0": offset}
+        
+        # Update UI
+        self.scene_combo.blockSignals(True)
+        self.scene_combo.clear()
+        self.scene_combo.addItem(scene)
+        self.scene_combo.blockSignals(False)
+        
+        self.cam_combo.blockSignals(True)
+        self.cam_combo.clear()
+        if self.avail_cams:
+            self.cam_combo.addItems(self.avail_cams)
+        else:
+            self.cam_combo.addItem("(no cameras)")
+        self.cam_combo.blockSignals(False)
+        
+        self.act_list.clear()
+        for i, a in enumerate(self.actions):
+            self.act_list.addItem(make_label(a, self.overrides.get(i)))
+        
+        self._suppress_spin = True
+        self.scene_off_spin.setValue(self.scene_offset)
+        self.skel_off_spin.setValue(self._skeleton_offset.get(scene, 0))
+        self._suppress_spin = False
+        
+        self.lbl_data.setText(os.path.basename(folder))
+        self.lbl_scene_info.setText(
+            f"Loaded from export: {len(self.actions)} actions, "
+            f"{len(self.avail_cams)} cameras, {self.pts3d.shape[0]} frames")
+        
+        # Select first action
+        if self.actions:
+            self.act_list.setCurrentRow(0)
+        
+        QMessageBox.information(self, "Loaded", 
+            f"Successfully loaded exported data from:\n{folder}\n\n"
+            f"Scene: {scene}\n"
+            f"Actions: {len(self.actions)}\n"
+            f"Cameras: {len(self.avail_cams)}\n"
+            f"3D Frames: {self.pts3d.shape[0]}")
+        
+        self.statusBar().showMessage(f"Loaded from export: {folder}")
 
     # =======================================================================
     #  Scene switching
@@ -1467,11 +1618,24 @@ class ClipAnnotator(QMainWindow):
         t_cs = self.clip_start / vf
         t_ce = self.clip_end / vf
         scene_tag = f"[{self.cur_scene}]  " if self.cur_scene else ""
+        
+        # Add skeleton frame sync info
+        skel_info = ""
+        if self.pts3d is not None and need_skel:
+            skel_off = self._skeleton_offset.get(self.cur_scene, 0)
+            pidx = v2p(self.cur_frame, self.vfps, self.pfps, self.pts3d.shape[0], skel_off)
+            # Show the mapping: video frame -> skeleton frame
+            skel_info = f"  Skel: {pidx}/{self.pts3d.shape[0]-1}"
+            # If FPS mismatch, show the ratio
+            if abs(self.vfps - self.pfps) > 0.1:
+                ratio = self.pfps / self.vfps
+                skel_info += f" ({ratio:.1f}x)"
+        
         self.info_lbl.setText(
             f"{scene_tag}Frame: {self.cur_frame} / {self.vtotal}   "
             f"Time: {fmt_time(t_cur)} / {fmt_time(t_tot)}   "
             f"Clip: {self.clip_start}-{self.clip_end} "
-            f"({fmt_time(t_cs)}-{fmt_time(t_ce)})")
+            f"({fmt_time(t_cs)}-{fmt_time(t_ce)}){skel_info}")
 
     # =======================================================================
     #  Joint dragging (Edit Mode)
@@ -1632,6 +1796,16 @@ class ClipAnnotator(QMainWindow):
                             if pidx_a != pidx_b:
                                 self.pts3d[pidx_a, joint] = pt3d
 
+                            # Track edited frames
+                            if pidx_b not in self._edited_frames:
+                                self._edited_frames[pidx_b] = set()
+                            self._edited_frames[pidx_b].add(joint)
+                            if pidx_a != pidx_b:
+                                if pidx_a not in self._edited_frames:
+                                    self._edited_frames[pidx_a] = set()
+                                self._edited_frames[pidx_a].add(joint)
+                            self._update_edited_frames_list()
+
                             # Undo: remove view-2 entry, keep view-1 (has original old_xyz)
                             if self._undo_stack:
                                 self._undo_stack.pop()  # remove view-2 undo
@@ -1677,6 +1851,11 @@ class ClipAnnotator(QMainWindow):
 
             # --- Normal (single-view) mode ---
             self._pts3d_dirty = True
+            # Track edited frame
+            if pidx not in self._edited_frames:
+                self._edited_frames[pidx] = set()
+            self._edited_frames[pidx].add(joint)
+            self._update_edited_frames_list()
             self.statusBar().showMessage(
                 f"Joint {joint} moved at pts3d frame {pidx}. "
                 f"Ctrl+Z to undo. {len(self._undo_stack)} edits in stack.")
@@ -1734,6 +1913,46 @@ class ClipAnnotator(QMainWindow):
         pd.DataFrame(flat, columns=cols).to_csv(path, index=False)
         self._pts3d_dirty = False
         QMessageBox.information(self, "Saved", f"3D points saved to:\n{path}")
+
+    def _update_edited_frames_list(self):
+        """Update the edited frames list widget."""
+        self.edited_frames_list.clear()
+        if not self._edited_frames:
+            self.edited_frames_lbl.setText("No edits yet")
+            return
+        
+        sorted_frames = sorted(self._edited_frames.keys())
+        for pidx in sorted_frames:
+            joints = self._edited_frames[pidx]
+            joint_str = ",".join(str(j) for j in sorted(joints))
+            if len(joints) > 5:
+                joint_str = f"{len(joints)} joints"
+            self.edited_frames_list.addItem(f"Frame {pidx}: J{joint_str}")
+        
+        total_edits = sum(len(joints) for joints in self._edited_frames.values())
+        self.edited_frames_lbl.setText(
+            f"{len(sorted_frames)} frames edited, {total_edits} joint edits total")
+    
+    def _on_edited_frame_clicked(self, item):
+        """Jump to the clicked edited frame."""
+        text = item.text()
+        # Extract frame number from "Frame 123: ..."
+        try:
+            pidx = int(text.split(":")[0].replace("Frame", "").strip())
+            # Convert pidx back to video frame
+            if self.pts3d is not None:
+                skel_off = self._skeleton_offset.get(self.cur_scene, 0)
+                # Reverse v2p: vf = (pidx * vfps / pfps) - off
+                vf = int(round(pidx * self.vfps / self.pfps)) - skel_off
+                vf = max(0, min(self.vtotal - 1, vf))
+                self.cur_frame = vf
+                self._suppress_spin = True
+                self.slider.setValue(vf)
+                self._suppress_spin = False
+                self._show_frame()
+                self.statusBar().showMessage(f"Jumped to edited frame: pts3d={pidx}, video={vf}")
+        except (ValueError, IndexError):
+            pass
 
     # =======================================================================
     #  Propagation (multi-frame editing)
@@ -1927,6 +2146,13 @@ class ClipAnnotator(QMainWindow):
                 self.pts3d, fs, fe, method=method, keyframes=kf_list if kf_list else None)
             self.pts3d[fs:fe + 1] = new_positions
             self._pts3d_dirty = True
+            # Track edited frames (all joints)
+            for pidx in range(fs, fe + 1):
+                if pidx not in self._edited_frames:
+                    self._edited_frames[pidx] = set()
+                for j in range(self.pts3d.shape[1]):
+                    self._edited_frames[pidx].add(j)
+            self._update_edited_frames_list()
             n_frames = fe - fs + 1
             n_kf = len(kf_list) + 2  # +2 for start/end
             self.statusBar().showMessage(
@@ -1952,6 +2178,12 @@ class ClipAnnotator(QMainWindow):
                 self.pts3d, joint, anchors, fs, fe, method=method)
             self.pts3d[fs:fe + 1, joint] = new_positions
             self._pts3d_dirty = True
+            # Track edited frames (single joint)
+            for pidx in range(fs, fe + 1):
+                if pidx not in self._edited_frames:
+                    self._edited_frames[pidx] = set()
+                self._edited_frames[pidx].add(joint)
+            self._update_edited_frames_list()
             n_frames = fe - fs + 1
             self.statusBar().showMessage(
                 f"Interpolated joint {joint} across {n_frames} frames "
@@ -1985,6 +2217,13 @@ class ClipAnnotator(QMainWindow):
                 self.pts3d, fs, fe, deltas, taper=taper)
             self.pts3d[fs:fe + 1] = new_positions
             self._pts3d_dirty = True
+            # Track edited frames (all joints)
+            for pidx in range(fs, fe + 1):
+                if pidx not in self._edited_frames:
+                    self._edited_frames[pidx] = set()
+                for j in range(self.pts3d.shape[1]):
+                    self._edited_frames[pidx].add(j)
+            self._update_edited_frames_list()
             n_frames = fe - fs + 1
             self.statusBar().showMessage(
                 f"Offset applied to ALL joints across {n_frames} frames "
@@ -2012,6 +2251,12 @@ class ClipAnnotator(QMainWindow):
                 self.pts3d, joint, fs, fe, d, taper=taper)
             self.pts3d[fs:fe + 1, joint] = new_positions
             self._pts3d_dirty = True
+            # Track edited frames (single joint)
+            for pidx in range(fs, fe + 1):
+                if pidx not in self._edited_frames:
+                    self._edited_frames[pidx] = set()
+                self._edited_frames[pidx].add(joint)
+            self._update_edited_frames_list()
             n_frames = fe - fs + 1
             self.statusBar().showMessage(
                 f"Offset applied to joint {joint} across {n_frames} frames "
@@ -2209,6 +2454,10 @@ class ClipAnnotator(QMainWindow):
         return lines
 
     def _export(self, all_actions, single_cam=False):
+        # Pause playback during export to avoid cap contention
+        was_playing = self.playing
+        if self.playing:
+            self.playing = False; self.timer.stop()
         if not self.actions:
             QMessageBox.warning(self, "Warning", "No actions loaded."); return
         if not self.video_folder and self.pts3d is None:
@@ -2403,11 +2652,18 @@ class ClipAnnotator(QMainWindow):
 
                 ie = self.calibs.get(cn)
                 fallback = None
+                # Seek once to the start; then read sequentially for speed
+                if cam_sf >= 0:
+                    cap2.set(cv2.CAP_PROP_POS_FRAMES, cam_sf)
+                cap2_pos = cam_sf  # track where cap2 is positioned
                 for step in range(out_len):
                     fi = cam_sf + step
                     if 0 <= fi < cam_vtotal:
-                        cap2.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                        # Only seek if we're not already at the right position
+                        if fi != cap2_pos:
+                            cap2.set(cv2.CAP_PROP_POS_FRAMES, fi)
                         ret, frm = cap2.read()
+                        cap2_pos = fi + 1  # after read(), position advances by 1
                         if not ret:
                             frm = fallback.copy() if fallback is not None else np.zeros((h, w, 3), dtype=np.uint8)
                         else:
@@ -2441,6 +2697,10 @@ class ClipAnnotator(QMainWindow):
                 op += 1; prog.setValue(op)
                 QCoreApplication.processEvents()
         prog.close()
+        # Restore playback state if it was playing before export
+        if was_playing:
+            self.playing = True
+            self.timer.start(int(1000 / self.vfps))
         QMessageBox.information(self, "Done",
             f"Exported {len(indices)} actions to:\n{act_dir}")
 
