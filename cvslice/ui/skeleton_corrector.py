@@ -69,6 +69,10 @@ class SkeletonCorrector(QMainWindow):
         self._actions: list[dict] = []
         self._cur_action_idx: int = -1
 
+        # Per-camera view offset (small integer, shifts video read position)
+        self._view_offsets: dict[str, int] = {}  # {cam_name: offset_frames}
+        self._raw_vtotal: int = 0  # original video frame count before trimming
+
         # Per-side projection cache for hit testing
         self._proj_L: np.ndarray | None = None
         self._proj_R: np.ndarray | None = None
@@ -138,12 +142,12 @@ class SkeletonCorrector(QMainWindow):
         cam_row = QHBoxLayout()
         cam_row.addWidget(QLabel("上视图:"))
         self.cam_top_combo = QComboBox()
-        self.cam_top_combo.currentTextChanged.connect(lambda _: self._show_frame())
+        self.cam_top_combo.currentTextChanged.connect(self._on_cam_changed)
         cam_row.addWidget(self.cam_top_combo)
         cam_row.addSpacing(20)
         cam_row.addWidget(QLabel("下视图:"))
         self.cam_bot_combo = QComboBox()
-        self.cam_bot_combo.currentTextChanged.connect(lambda _: self._show_frame())
+        self.cam_bot_combo.currentTextChanged.connect(self._on_cam_changed)
         cam_row.addWidget(self.cam_bot_combo)
         cam_row.addStretch()
         viewcol.addLayout(cam_row)
@@ -234,6 +238,25 @@ class SkeletonCorrector(QMainWindow):
         h2.setStyleSheet("color:#888;")
         sf.addRow(h2)
         rp.addWidget(sm_g)
+
+        # View offset group
+        vo_g = QGroupBox("视频偏移 (View Offset)")
+        vof = QFormLayout(vo_g)
+        self.vo_top_spin = QSpinBox()
+        self.vo_top_spin.setRange(-30, 30)
+        self.vo_top_spin.setValue(0)
+        self.vo_top_spin.valueChanged.connect(self._on_view_offset_changed)
+        vof.addRow("上视图:", self.vo_top_spin)
+        self.vo_bot_spin = QSpinBox()
+        self.vo_bot_spin.setRange(-30, 30)
+        self.vo_bot_spin.setValue(0)
+        self.vo_bot_spin.valueChanged.connect(self._on_view_offset_changed)
+        vof.addRow("下视图:", self.vo_bot_spin)
+        vo_hint = QLabel("微调视频时间对齐。\n超出范围的帧会被裁掉。")
+        vo_hint.setWordWrap(True)
+        vo_hint.setStyleSheet("color:#888;")
+        vof.addRow(vo_hint)
+        rp.addWidget(vo_g)
 
         un_g = QGroupBox("撤销")
         ug = QVBoxLayout(un_g)
@@ -396,6 +419,8 @@ class SkeletonCorrector(QMainWindow):
         self.caps = caps
         self.vfps = vfps
         self.vtotal = min_vtotal if min_vtotal > 0 else pts3d.shape[0]
+        self._raw_vtotal = self.vtotal
+        self._view_offsets.clear()
 
         # Estimate skeleton FPS and frame ratio from exported clip
         if self.vtotal > 1 and pts3d.shape[0] > 1:
@@ -432,6 +457,8 @@ class SkeletonCorrector(QMainWindow):
             self.cam_bot_combo.setCurrentIndex(1)
         self.cam_top_combo.blockSignals(False)
         self.cam_bot_combo.blockSignals(False)
+        self._sync_vo_spins()
+        self._recalc_vtotal()
 
         self.slider.setRange(0, max(0, self.vtotal - 1))
         self.slider.setValue(0)
@@ -541,10 +568,12 @@ class SkeletonCorrector(QMainWindow):
         cap = self.caps.get(cam) if cam else None
         if cap is None:
             return np.zeros((480, 640, 3), dtype=np.uint8)
+        off = self._view_offsets.get(cam, 0)
+        src_fi = fi + off
         tot = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if fi < 0 or fi >= tot:
+        if src_fi < 0 or src_fi >= tot:
             return np.zeros((480, 640, 3), dtype=np.uint8)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, src_fi)
         ret, frm = cap.read()
         if not ret or frm is None:
             return np.zeros((480, 640, 3), dtype=np.uint8)
@@ -716,6 +745,63 @@ class SkeletonCorrector(QMainWindow):
             self, "平滑",
             f"已对关节 {affected} 在 {win}-帧高斯窗口上做平滑。")
 
+    def _on_cam_changed(self, _text: str = "") -> None:
+        self._sync_vo_spins()
+        self._show_frame()
+
+    # -------------------------------------------------------- view offset
+    def _on_view_offset_changed(self, _val: int = 0) -> None:
+        """Update view offsets and recalculate effective vtotal."""
+        top_cam = self.cam_top_combo.currentText()
+        bot_cam = self.cam_bot_combo.currentText()
+        if top_cam:
+            self._view_offsets[top_cam] = self.vo_top_spin.value()
+        if bot_cam:
+            self._view_offsets[bot_cam] = self.vo_bot_spin.value()
+        self._recalc_vtotal()
+        self._show_frame()
+
+    def _recalc_vtotal(self) -> None:
+        """Recalculate effective vtotal considering view offsets.
+
+        If an offset pushes a camera out of range, trim the timeline so
+        no blank frames appear."""
+        if self._raw_vtotal <= 0:
+            return
+        # For each active camera with a cap, compute valid range
+        max_start = 0
+        min_end = self._raw_vtotal - 1
+        for cn, cap in self.caps.items():
+            off = self._view_offsets.get(cn, 0)
+            cam_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if cam_total <= 0:
+                continue
+            # Video frame fi + off must be in [0, cam_total-1]
+            # fi >= -off  =>  fi >= max(0, -off)
+            # fi + off < cam_total  =>  fi < cam_total - off
+            valid_start = max(0, -off)
+            valid_end = min(self._raw_vtotal - 1, cam_total - 1 - off)
+            max_start = max(max_start, valid_start)
+            min_end = min(min_end, valid_end)
+        new_vtotal = max(1, min_end - max_start + 1)
+        if new_vtotal != self.vtotal:
+            self.vtotal = new_vtotal
+            self.slider.setRange(0, max(0, self.vtotal - 1))
+            if self.cur_frame >= self.vtotal:
+                self.cur_frame = self.vtotal - 1
+                self.slider.setValue(self.cur_frame)
+
+    def _sync_vo_spins(self) -> None:
+        """Sync view offset spinboxes to current camera selection."""
+        top_cam = self.cam_top_combo.currentText()
+        bot_cam = self.cam_bot_combo.currentText()
+        self.vo_top_spin.blockSignals(True)
+        self.vo_bot_spin.blockSignals(True)
+        self.vo_top_spin.setValue(self._view_offsets.get(top_cam, 0))
+        self.vo_bot_spin.setValue(self._view_offsets.get(bot_cam, 0))
+        self.vo_top_spin.blockSignals(False)
+        self.vo_bot_spin.blockSignals(False)
+
     # --------------------------------------------------------- playback
     def _on_slider(self, v: int) -> None:
         self.cur_frame = v
@@ -749,6 +835,48 @@ class SkeletonCorrector(QMainWindow):
                 return
         self.cur_frame = nf
         self.slider.setValue(nf)
+
+    # --------------------------------------------------------- keyboard
+    def keyPressEvent(self, event):  # noqa: N802
+        k = event.key()
+        if k == Qt.Key_Space:
+            self.play_btn.toggle()
+        elif k == Qt.Key_W:
+            # Previous action
+            idx = self.action_combo.currentIndex() - 1
+            if idx >= 0:
+                self.action_combo.setCurrentIndex(idx)
+        elif k == Qt.Key_S:
+            # Next action
+            idx = self.action_combo.currentIndex() + 1
+            if idx < self.action_combo.count():
+                self.action_combo.setCurrentIndex(idx)
+        elif k == Qt.Key_Q:
+            # Previous camera for top view
+            idx = self.cam_top_combo.currentIndex() - 1
+            if idx >= 0:
+                self.cam_top_combo.setCurrentIndex(idx)
+        elif k == Qt.Key_E:
+            # Next camera for top view
+            idx = self.cam_top_combo.currentIndex() + 1
+            if idx < self.cam_top_combo.count():
+                self.cam_top_combo.setCurrentIndex(idx)
+        elif k == Qt.Key_A:
+            # Previous camera for bottom view
+            idx = self.cam_bot_combo.currentIndex() - 1
+            if idx >= 0:
+                self.cam_bot_combo.setCurrentIndex(idx)
+        elif k == Qt.Key_D:
+            # Next camera for bottom view
+            idx = self.cam_bot_combo.currentIndex() + 1
+            if idx < self.cam_bot_combo.count():
+                self.cam_bot_combo.setCurrentIndex(idx)
+        elif k == Qt.Key_Left:
+            self._step(-1)
+        elif k == Qt.Key_Right:
+            self._step(1)
+        else:
+            super().keyPressEvent(event)
 
     # --------------------------------------------------------- shutdown
     def closeEvent(self, event):  # noqa: N802
