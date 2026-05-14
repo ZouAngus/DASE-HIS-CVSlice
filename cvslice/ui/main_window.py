@@ -2679,6 +2679,15 @@ class ClipAnnotator(QMainWindow):
                 fps = cap2.get(cv2.CAP_PROP_FPS) or 30.0
                 w = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
                 h = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                # Recompute pfps for this camera's own frame count.
+                # Each camera may have a slightly different vtotal, so
+                # using self.pfps (from the last-previewed camera) causes
+                # skeleton drift that grows with frame number.
+                if self.pts3d is not None and cam_vtotal > 0 and fps > 0:
+                    cam_dur = cam_vtotal / fps
+                    cam_pfps = self.pts3d.shape[0] / cam_dur if cam_dur > 0 else self.pfps
+                else:
+                    cam_pfps = self.pfps
                 out_len = max(1, base_ef - base_sf + 1)
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
@@ -2719,7 +2728,7 @@ class ClipAnnotator(QMainWindow):
                     canonical_fi = base_sf + step
                     if self.pts3d is not None and ie:
                         intr, extr = ie
-                        pidx = v2p(canonical_fi, self.vfps, self.pfps,
+                        pidx = v2p(canonical_fi, fps, cam_pfps,
                                    self.pts3d.shape[0], cam_skel_off)
                         pts = self.pts3d[pidx]
                         if self.pts3d_valid is not None and self.pts3d_valid[pidx]:
@@ -2731,7 +2740,7 @@ class ClipAnnotator(QMainWindow):
                                     nan_mask = self.pts3d_was_nan[pidx]
                                 draw_skel_with_confidence(chk, proj, nan_mask)
                     t = max(0, fi) / fps
-                    cv2.putText(chk, f"srcF:{fi} canonF:{canonical_fi} P:{v2p(canonical_fi, self.vfps, self.pfps, self.pts3d.shape[0], cam_skel_off) if self.pts3d is not None else '?'}",
+                    cv2.putText(chk, f"srcF:{fi} canonF:{canonical_fi} P:{v2p(canonical_fi, fps, cam_pfps, self.pts3d.shape[0], cam_skel_off) if self.pts3d is not None else '?'}",
                                 (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
                                 (255, 255, 255), 2)
                     chk_writer.write(chk)
