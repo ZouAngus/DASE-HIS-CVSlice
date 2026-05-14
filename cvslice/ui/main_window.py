@@ -850,6 +850,13 @@ class ClipAnnotator(QMainWindow):
             self.actions = parse_excel_actions(self.xlsx_path, scene_name)
         else:
             self.actions = []
+        # If annotations contain a saved actions list (with added reps),
+        # use it instead of the Excel-only list — but only when the base
+        # actions still match (guard against stale annotation data).
+        saved = self._annotations.get(scene_name, {})
+        saved_actions = saved.get("actions")
+        if saved_actions and len(saved_actions) >= len(self.actions):
+            self.actions = saved_actions
 
         csv_path = None
         self.video_folder = None
@@ -978,6 +985,7 @@ class ClipAnnotator(QMainWindow):
             "overrides": {str(k): v for k, v in self.overrides.items()},
             "view_offsets": self._view_offsets.get(self.cur_scene, {}),
             "skeleton_offset": self._skeleton_offset.get(self.cur_scene, 0),
+            "actions": self.actions,
         }
         self._annotations[self.cur_scene] = scene_data
         save_annotations(self.xlsx_path, self._annotations)
@@ -1213,11 +1221,23 @@ class ClipAnnotator(QMainWindow):
         new_a["label"] = make_label(new_a)
         insert_idx = src_row + 1
         self.actions.insert(insert_idx, new_a)
+        # Shift overrides keys
         new_ov = {}
         for k, v in self.overrides.items():
             if k >= insert_idx: new_ov[k + 1] = v
             else: new_ov[k] = v
         self.overrides = new_ov
+        # Shift view_offsets keys for current scene
+        if self.cur_scene and self.cur_scene in self._view_offsets:
+            for cam, cam_dict in self._view_offsets[self.cur_scene].items():
+                new_cd = {}
+                for k, v in cam_dict.items():
+                    ki = int(k)
+                    if ki >= insert_idx:
+                        new_cd[str(ki + 1)] = v
+                    else:
+                        new_cd[k] = v
+                self._view_offsets[self.cur_scene][cam] = new_cd
         self._refresh_act_list()
         self.act_list.setCurrentRow(insert_idx)
         self._auto_save()
@@ -1237,6 +1257,18 @@ class ClipAnnotator(QMainWindow):
             if k > row: new_ov[k - 1] = v
             elif k < row: new_ov[k] = v
         self.overrides = new_ov
+        # Shift view_offsets keys for current scene
+        if self.cur_scene and self.cur_scene in self._view_offsets:
+            for cam, cam_dict in list(self._view_offsets[self.cur_scene].items()):
+                new_cd = {}
+                for k, v in cam_dict.items():
+                    ki = int(k)
+                    if ki > row:
+                        new_cd[str(ki - 1)] = v
+                    elif ki < row:
+                        new_cd[k] = v
+                    # ki == row: deleted, skip
+                self._view_offsets[self.cur_scene][cam] = new_cd
         self._refresh_act_list()
         if self.actions:
             self.act_list.setCurrentRow(min(row, len(self.actions) - 1))
@@ -1638,11 +1670,14 @@ class ClipAnnotator(QMainWindow):
                 ratio = self.pfps / self.vfps
                 skel_info += f" ({ratio:.1f}x)"
         
+        total_off = self._get_total_video_off() if self.cur_act >= 0 else 0
+        eff_s = self.clip_start + total_off
+        eff_e = self.clip_end + total_off
         self.info_lbl.setText(
             f"{scene_tag}Frame: {self.cur_frame} / {self.vtotal}   "
             f"Time: {fmt_time(t_cur)} / {fmt_time(t_tot)}   "
             f"Clip: {self.clip_start}-{self.clip_end} "
-            f"({fmt_time(t_cs)}-{fmt_time(t_ce)}){skel_info}")
+            f"(实际裁切: {eff_s}-{eff_e}){skel_info}")
 
     # =======================================================================
     #  Joint dragging (Edit Mode)
