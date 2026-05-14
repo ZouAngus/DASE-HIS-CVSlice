@@ -850,12 +850,11 @@ class ClipAnnotator(QMainWindow):
             self.actions = parse_excel_actions(self.xlsx_path, scene_name)
         else:
             self.actions = []
-        # If annotations contain a saved actions list (with added reps),
-        # use it instead of the Excel-only list — but only when the base
-        # actions still match (guard against stale annotation data).
+        # If annotations contain a saved actions list (with added/deleted reps),
+        # use it instead of the Excel-only list.
         saved = self._annotations.get(scene_name, {})
         saved_actions = saved.get("actions")
-        if saved_actions and len(saved_actions) >= len(self.actions):
+        if saved_actions is not None:
             self.actions = saved_actions
 
         csv_path = None
@@ -1240,7 +1239,10 @@ class ClipAnnotator(QMainWindow):
                 self._view_offsets[self.cur_scene][cam] = new_cd
         self._refresh_act_list()
         self.act_list.setCurrentRow(insert_idx)
-        self._auto_save()
+        # Force immediate save for structural changes
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+        self._save_scene_state()
         self.statusBar().showMessage(f"Added repetition: {new_a['label']}")
 
     def _delete_action(self, row):
@@ -1272,7 +1274,12 @@ class ClipAnnotator(QMainWindow):
         self._refresh_act_list()
         if self.actions:
             self.act_list.setCurrentRow(min(row, len(self.actions) - 1))
-        self._auto_save()
+        # Force immediate save (don't rely on timer for structural changes)
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+        self._save_scene_state()
+        self.statusBar().showMessage(
+            f"Deleted action at row {row}. {len(self.actions)} actions remaining.")
 
     def _auto_save(self):
         self._save_timer.start()
