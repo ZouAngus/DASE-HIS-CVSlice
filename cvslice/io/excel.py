@@ -22,9 +22,29 @@ def parse_excel_actions(xlsx_path: str, sheet_name: str) -> list[dict]:
                 best = (n, i)
         action_col = best[1]
 
+    # Skip known metadata columns that can be mistaken for frame numbers
+    _skip_cols = set()
+    if no_col is not None:
+        _skip_cols.add(no_col)
+    if action_col is not None:
+        _skip_cols.add(action_col)
+    for i, c in enumerate(df.columns):
+        cl = str(c).strip().lower()
+        if cl in ("project", "project.1", "loading time", "applicable version"):
+            _skip_cols.add(i)
+            continue
+        # Time (s): skip only if values look like durations (mean < 100);
+        # keep if values are actually frame numbers (mean >= 100)
+        if cl in ("time (s)", "time(s)", "time"):
+            vals = pd.to_numeric(df.iloc[:, i], errors="coerce").dropna()
+            if len(vals) >= 2 and float(vals.mean()) < 100:
+                _skip_cols.add(i)
+
     # Detect numeric columns (frame numbers)
     num_cols = []
     for i in range(len(df.columns)):
+        if i in _skip_cols:
+            continue
         vals = pd.to_numeric(df.iloc[:, i], errors="coerce").dropna()
         if len(vals) >= 2 and float(vals.mean()) > 10:
             num_cols.append(i)
