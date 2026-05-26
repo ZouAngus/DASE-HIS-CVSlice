@@ -19,6 +19,6 @@ check_deps.bat
 data/
 calibration/
 
-# Old single-file version
+# Legacy
 cvslice.py
-CVFrame2-v3
+CVFrame2-v3/
