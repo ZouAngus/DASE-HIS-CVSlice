@@ -855,7 +855,15 @@ class ClipAnnotator(QMainWindow):
         saved = self._annotations.get(scene_name, {})
         saved_actions = saved.get("actions")
         if saved_actions is not None:
-            self.actions = saved_actions
+            # Sanity check: discard saved actions if frame numbers look
+            # corrupt (e.g. all start frames <= 100, typically caused by
+            # metadata columns being misidentified as frame numbers).
+            _real = sum(1 for a in saved_actions if a.get("start", 0) > 100)
+            if _real > 0 or len(saved_actions) == 0:
+                self.actions = saved_actions
+            else:
+                print(f"[CVSlice] Discarding {len(saved_actions)} corrupt "
+                      f"saved actions for {scene_name!r}, re-parsing Excel.")
 
         csv_path = None
         self.video_folder = None
