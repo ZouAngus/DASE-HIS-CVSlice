@@ -851,7 +851,7 @@ class ClipAnnotator(QMainWindow):
         else:
             self.actions = []
         # If annotations contain a saved actions list (with added/deleted reps),
-        # use it instead of the Excel-only list.
+        # use it instead of the Excel-only list — but check for new reps first.
         saved = self._annotations.get(scene_name, {})
         saved_actions = saved.get("actions")
         if saved_actions is not None:
@@ -860,7 +860,18 @@ class ClipAnnotator(QMainWindow):
             # metadata columns being misidentified as frame numbers).
             _real = sum(1 for a in saved_actions if a.get("start", 0) > 100)
             if _real > 0 or len(saved_actions) == 0:
-                self.actions = saved_actions
+                # Check if Excel has new reps not in saved annotations
+                excel_actions = self.actions  # freshly parsed from Excel
+                new_reps = self._find_new_reps(excel_actions, saved_actions)
+                if new_reps:
+                    merged = self._prompt_merge_new_reps(
+                        scene_name, saved_actions, excel_actions, new_reps)
+                    if merged is not None:
+                        self.actions = merged
+                    else:
+                        self.actions = saved_actions
+                else:
+                    self.actions = saved_actions
             else:
                 print(f"[CVSlice] Discarding {len(saved_actions)} corrupt "
                       f"saved actions for {scene_name!r}, re-parsing Excel.")
@@ -985,6 +996,96 @@ class ClipAnnotator(QMainWindow):
     # =======================================================================
     #  Annotations save/load
     # =======================================================================
+    def _find_new_reps(self, excel_actions, saved_actions):
+        """Find actions in excel_actions that are missing from saved_actions.
+
+        Returns a list of action dicts present in Excel but not in saved.
+        Matching is done by (action, variant, start, end) to avoid false positives.
+        """
+        saved_keys = set()
+        for a in saved_actions:
+            key = (a.get("action", ""), a.get("variant", ""),
+                   a.get("start", 0), a.get("end", 0))
+            saved_keys.add(key)
+
+        new_reps = []
+        for a in excel_actions:
+            key = (a.get("action", ""), a.get("variant", ""),
+                   a.get("start", 0), a.get("end", 0))
+            if key not in saved_keys:
+                new_reps.append(a)
+        return new_reps
+
+    def _prompt_merge_new_reps(self, scene_name, saved_actions, excel_actions, new_reps):
+        """Show dialog listing new reps found in Excel; let user choose to merge.
+
+        Returns merged action list if user accepts, None if user declines.
+        Overrides are re-indexed to stay attached to the correct actions.
+        """
+        lines = []
+        for a in new_reps:
+            rep = a.get("rep", "rep1")
+            variant = a.get("variant", "")
+            lines.append(
+                f"  {a['action']} [{variant}] {rep}: {a['start']}-{a['end']}")
+        msg = (f"Excel has {len(new_reps)} new repetition(s) for scene "
+               f"\"{scene_name}\" not in saved annotations:\n\n"
+               + "\n".join(lines[:20]))
+        if len(lines) > 20:
+            msg += f"\n  ... and {len(lines) - 20} more"
+        msg += ("\n\nMerge new repetitions into the action list?\n"
+                "(Your existing offsets will be preserved.)")
+
+        reply = QMessageBox.question(
+            self, "New Repetitions Found", msg,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+        if reply != QMessageBox.Yes:
+            return None
+
+        # Merge: use excel order as canonical, keep saved overrides attached.
+        saved_lookup = {}
+        for i, a in enumerate(saved_actions):
+            key = (a.get("action", ""), a.get("variant", ""),
+                   a.get("start", 0), a.get("end", 0))
+            saved_lookup[key] = i
+
+        merged = []
+        old_to_new_idx = {}  # saved_index -> new_index
+        for a in excel_actions:
+            key = (a.get("action", ""), a.get("variant", ""),
+                   a.get("start", 0), a.get("end", 0))
+            if key in saved_lookup:
+                saved_idx = saved_lookup[key]
+                merged.append(saved_actions[saved_idx])
+                old_to_new_idx[saved_idx] = len(merged) - 1
+            else:
+                merged.append(a)
+
+        # Include any saved actions NOT in excel (user-added manual reps)
+        for i, a in enumerate(saved_actions):
+            if i not in old_to_new_idx:
+                merged.append(a)
+                old_to_new_idx[i] = len(merged) - 1
+
+        # Remap overrides to new indices
+        old_overrides = self._annotations.get(scene_name, {}).get("overrides", {})
+        new_overrides = {}
+        for old_idx_str, ov_val in old_overrides.items():
+            old_idx = int(old_idx_str)
+            if old_idx in old_to_new_idx:
+                new_idx = old_to_new_idx[old_idx]
+                new_overrides[str(new_idx)] = ov_val
+
+        # Update annotations in place
+        scene_data = self._annotations.setdefault(scene_name, {})
+        scene_data["overrides"] = new_overrides
+        scene_data["actions"] = merged
+        self.overrides = {int(k): v for k, v in new_overrides.items()}
+
+        print(f"[CVSlice] Merged {len(new_reps)} new rep(s) into "
+              f"{scene_name!r}. Total actions: {len(merged)}")
+        return merged
+
     def _save_scene_state(self):
         if not self.cur_scene or not self.xlsx_path: return
         scene_data = {

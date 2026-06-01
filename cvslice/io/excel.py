@@ -78,11 +78,18 @@ def parse_excel_actions(xlsx_path: str, sheet_name: str) -> list[dict]:
 
     start_col, end_col = best_pair
 
-    # Extra repetition column pairs
+    # Extra repetition column pairs — scan ALL columns after end_col,
+    # using a relaxed threshold (>= 1 row) so that rare reps are not missed.
     extra_pairs = []
-    remaining = [c for c in num_cols if c > end_col]
-    for ri in range(0, len(remaining) - 1, 2):
-        extra_pairs.append((remaining[ri], remaining[ri + 1]))
+    _extra_candidates = []
+    for i in range(end_col + 1, len(df.columns)):
+        if i in _skip_cols:
+            continue
+        vals = pd.to_numeric(df.iloc[:, i], errors="coerce").dropna()
+        if len(vals) >= 1 and float(vals.mean()) > 10:
+            _extra_candidates.append(i)
+    for ri in range(0, len(_extra_candidates) - 1, 2):
+        extra_pairs.append((_extra_candidates[ri], _extra_candidates[ri + 1]))
 
     # Variant column (next to action)
     variant_col = None
