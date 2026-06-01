@@ -80,6 +80,8 @@ def parse_excel_actions(xlsx_path: str, sheet_name: str) -> list[dict]:
 
     # Extra repetition column pairs — scan ALL columns after end_col,
     # using a relaxed threshold (>= 1 row) so that rare reps are not missed.
+    # Stop when there's a large gap (>3 columns) to avoid picking up
+    # unrelated columns far to the right (e.g., "Repetition 9 Start").
     extra_pairs = []
     _extra_candidates = []
     for i in range(end_col + 1, len(df.columns)):
@@ -87,6 +89,9 @@ def parse_excel_actions(xlsx_path: str, sheet_name: str) -> list[dict]:
             continue
         vals = pd.to_numeric(df.iloc[:, i], errors="coerce").dropna()
         if len(vals) >= 1 and float(vals.mean()) > 10:
+            # Check continuity: if gap from last candidate > 3, stop
+            if _extra_candidates and i - _extra_candidates[-1] > 3:
+                break
             _extra_candidates.append(i)
     for ri in range(0, len(_extra_candidates) - 1, 2):
         extra_pairs.append((_extra_candidates[ri], _extra_candidates[ri + 1]))
