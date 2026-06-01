@@ -1000,19 +1000,29 @@ class ClipAnnotator(QMainWindow):
         """Find actions in excel_actions that are missing from saved_actions.
 
         Returns a list of action dicts present in Excel but not in saved.
-        Matching is done by (action, variant, start, end) to avoid false positives.
+        Uses (start, end) as primary key since action names may differ between
+        old annotation formats and current Excel parsing.
+        Only reports new reps if at least half of Excel actions match saved
+        (to avoid false positives when formats are completely different).
         """
-        saved_keys = set()
+        # Primary match by (start, end) frame pair
+        saved_frames = set()
         for a in saved_actions:
-            key = (a.get("action", ""), a.get("variant", ""),
-                   a.get("start", 0), a.get("end", 0))
-            saved_keys.add(key)
+            saved_frames.add((a.get("start", 0), a.get("end", 0)))
+
+        # Check overlap ratio — if too few match, formats are incompatible
+        excel_frames = set()
+        for a in excel_actions:
+            excel_frames.add((a.get("start", 0), a.get("end", 0)))
+        overlap = len(saved_frames & excel_frames)
+        # Need at least 50% of saved actions to match Excel by frame numbers
+        if len(saved_actions) > 0 and overlap < len(saved_actions) * 0.5:
+            return []
 
         new_reps = []
         for a in excel_actions:
-            key = (a.get("action", ""), a.get("variant", ""),
-                   a.get("start", 0), a.get("end", 0))
-            if key not in saved_keys:
+            key = (a.get("start", 0), a.get("end", 0))
+            if key not in saved_frames:
                 new_reps.append(a)
         return new_reps
 
@@ -1043,22 +1053,23 @@ class ClipAnnotator(QMainWindow):
             return None
 
         # Merge: use excel order as canonical, keep saved overrides attached.
+        # Match by (start, end) frame pair to handle different naming formats.
         saved_lookup = {}
         for i, a in enumerate(saved_actions):
-            key = (a.get("action", ""), a.get("variant", ""),
-                   a.get("start", 0), a.get("end", 0))
+            key = (a.get("start", 0), a.get("end", 0))
             saved_lookup[key] = i
 
         merged = []
         old_to_new_idx = {}  # saved_index -> new_index
         for a in excel_actions:
-            key = (a.get("action", ""), a.get("variant", ""),
-                   a.get("start", 0), a.get("end", 0))
+            key = (a.get("start", 0), a.get("end", 0))
             if key in saved_lookup:
                 saved_idx = saved_lookup[key]
+                # Use saved version (may have user edits to start/end)
                 merged.append(saved_actions[saved_idx])
                 old_to_new_idx[saved_idx] = len(merged) - 1
             else:
+                # New rep from Excel
                 merged.append(a)
 
         # Include any saved actions NOT in excel (user-added manual reps)
