@@ -871,7 +871,18 @@ class ClipAnnotator(QMainWindow):
                     else:
                         self.actions = saved_actions
                 else:
-                    self.actions = saved_actions
+                    # No new reps detected by _find_new_reps. But if Excel has
+                    # significantly more actions than saved (e.g. due to a prior
+                    # parsing bug that truncated reps), prefer the Excel result
+                    # so newly-parsed reps are not hidden by stale annotations.
+                    if len(excel_actions) > len(saved_actions):
+                        print(
+                            f"[CVSlice] Excel has {len(excel_actions)} actions "
+                            f"vs {len(saved_actions)} saved; using Excel result."
+                        )
+                        self.actions = excel_actions
+                    else:
+                        self.actions = saved_actions
             else:
                 print(f"[CVSlice] Discarding {len(saved_actions)} corrupt "
                       f"saved actions for {scene_name!r}, re-parsing Excel.")
