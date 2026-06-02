@@ -46,7 +46,7 @@ def parse_excel_actions(xlsx_path: str, sheet_name: str) -> list[dict]:
         if i in _skip_cols:
             continue
         vals = pd.to_numeric(df.iloc[:, i], errors="coerce").dropna()
-        if len(vals) >= 2 and float(vals.mean()) > 10:
+        if len(vals) >= 1 and float(vals.mean()) > 10:
             num_cols.append(i)
     if len(num_cols) < 2:
         return []
