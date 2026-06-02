@@ -113,40 +113,21 @@ def find_cameras_in_folder(folder: str, scene_hint: str | None = None) -> list[s
     return cams
 
 
-def load_csv_as_pts3d(csv_path: str) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, float]:
+def load_csv_as_pts3d(csv_path: str) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     """Load extracted CSV -> (T, J, 3) array with NaN interpolation.
 
-    Returns (pts3d_array, valid_mask, was_nan_mask, fps):
+    Returns (pts3d_array, valid_mask, was_nan_mask):
         - pts3d_array: (T, J, 3) with NaN replaced by interpolated values
         - valid_mask: (T,) bool — True if frame has at least one originally valid joint
         - was_nan_mask: (T, J) bool — True where original data was NaN (now interpolated)
-        - fps: float — Export Frame Rate from CSV header (default 240.0 if not found)
     """
     from ..vision.interpolation import interpolate_joints
-
-    # Read CSV header to extract frame rate
-    fps = 240.0  # default
-    try:
-        with open(csv_path, "r") as f:
-            first_line = f.readline()
-            if "Export Frame Rate" in first_line:
-                parts = first_line.split(",")
-                for i, part in enumerate(parts):
-                    if "Export Frame Rate" in part and i + 1 < len(parts):
-                        try:
-                            fps = float(parts[i + 1])
-                            break
-                        except:
-                            pass
-    except:
-        pass
-
 
     df = pd.read_csv(csv_path)
     df = df.apply(pd.to_numeric, errors="coerce")
     nc = df.shape[1]
     if nc % 3 != 0:
-        return None, None, None, fps
+        return None, None, None
     pts_raw = df.values.reshape(-1, nc // 3, 3)
 
     # Interpolate NaN gaps
@@ -154,4 +135,4 @@ def load_csv_as_pts3d(csv_path: str) -> tuple[np.ndarray | None, np.ndarray | No
 
     # Valid mask: frame has at least one originally non-NaN joint
     valid = ~np.all(was_nan, axis=1)
-    return pts_filled, valid, was_nan, fps
+    return pts_filled, valid, was_nan

@@ -1015,10 +1015,8 @@ class ClipAnnotator(QMainWindow):
         for a in excel_actions:
             excel_frames.add((a.get("start", 0), a.get("end", 0)))
         overlap = len(saved_frames & excel_frames)
-        print(f"[CVSlice DEBUG] _find_new_reps: saved={len(saved_actions)} excel={len(excel_actions)} overlap={overlap} threshold={len(saved_actions)*0.5}")
         # Need at least 50% of saved actions to match Excel by frame numbers
         if len(saved_actions) > 0 and overlap < len(saved_actions) * 0.5:
-            print(f"[CVSlice DEBUG] Overlap too low, returning [] (no merge popup)")
             return []
 
         new_reps = []
