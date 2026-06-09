@@ -48,33 +48,28 @@ if __name__ == "__main__":
 
     # ── Edit these paths directly when running from the IDE ────────────────
     IDE_INPUT_FILES = [
-        r"./13/1.15_13/gallery_13_topcenter.mp4",
-        r"./13/1.15_13/gallery_13_topleft.mp4",
-        r"./13/1.15_13/gallery_13_topright.mp4",
-        r"./13/1.15_13/star_13_topcenter.mp4",
-        r"./13/1.15_13/star_13_topleft.mp4",
-        r"./13/1.15_13/star_13_topright.mp4",
-        r"./13/1.15_13/sword_13_topcenter.mp4",
-        r"./13/1.15_13/sword_13_topleft.mp4",
-        r"./13/1.15_13/sword_13_topright.mp4",
-        r"./13/1.15_13/travel_13_topcenter.mp4",
-        r"./13/1.15_13/travel_13_topleft.mp4",
-        r"./13/1.15_13/travel_13_topright.mp4",
-        r"./13/1.15_13/trove_13_topcenter.mp4",
-        r"./13/1.15_13/trove_13_topleft.mp4",
-        r"./13/1.15_13/trove_13_topright.mp4",
+        r"./13/1.15_13/boss_13_topleft.mp4",
+        # r"./13/1.15_13/boss_13_topright.mp4",
+        # r"./13/1.15_13/boss_13_topcenter.mp4",
+        # r"./13/1.15_13/gallery_13_topcenter.mp4",
+        # r"./13/1.15_13/gallery_13_topleft.mp4",
+        # r"./13/1.15_13/gallery_13_topright.mp4",
+        # r"./13/1.15_13/star_13_topcenter.mp4",
+        # r"./13/1.15_13/star_13_topleft.mp4",
+        # r"./13/1.15_13/star_13_topright.mp4",
+        # r"./13/1.15_13/sword_13_topcenter.mp4",
+        # r"./13/1.15_13/sword_13_topleft.mp4",
+        # r"./13/1.15_13/sword_13_topright.mp4",
+        # r"./13/1.15_13/travel_13_topcenter.mp4",
+        # r"./13/1.15_13/travel_13_topleft.mp4",
+        # r"./13/1.15_13/travel_13_topright.mp4",
+        # r"./13/1.15_13/trove_13_topcenter.mp4",
+        # r"./13/1.15_13/trove_13_topleft.mp4",
+        # r"./13/1.15_13/trove_13_topright.mp4",
 
-        r"./13/1.15_13/travel_13_002_topcenter.mp4",
-        r"./13/1.15_13/travel_13_002_topleft.mp4",
-        r"./13/1.15_13/travel_13_002_topright.mp4",
-
-        # r"./15/1.16_15/gallery_15_topleft.mp4",
-        # r"./15/1.16_15/boss_15_topleft.mp4",
-        # r"./15/1.16_15/boss_15_topright.mp4",
-        # r"./15/1.16_15/boss_15_topcenter.mp4",
-
-
-
+        # r"./13/1.15_13/travel_13_002_topcenter.mp4",
+        # r"./13/1.15_13/travel_13_002_topleft.mp4",
+        # r"./13/1.15_13/travel_13_002_topright.mp4",
 
         # r"C:\path\to\another_video.mp4",
     ]

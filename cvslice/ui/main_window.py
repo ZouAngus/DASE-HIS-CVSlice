@@ -61,6 +61,7 @@ class ClipAnnotator(QMainWindow):
         self.pts3d_valid = None
         self.pts3d_was_nan = None   # (T, J) bool: True = originally NaN, now interpolated
         self.pfps = DEFAULT_POINTS_FPS
+        self.csv_fps = DEFAULT_POINTS_FPS
         self.calibs: dict = {}
         self.scene_offset = 0
         self.overrides: dict = {}
@@ -750,6 +751,7 @@ class ClipAnnotator(QMainWindow):
             return
         
         self.pts3d, self.pts3d_valid, self.pts3d_was_nan, _csv_fps = result
+        self.csv_fps = _csv_fps or DEFAULT_POINTS_FPS
         
         # Load calibration if present
         cal_folder = os.path.join(folder, "calibration")
@@ -871,18 +873,7 @@ class ClipAnnotator(QMainWindow):
                     else:
                         self.actions = saved_actions
                 else:
-                    # No new reps detected by _find_new_reps. But if Excel has
-                    # significantly more actions than saved (e.g. due to a prior
-                    # parsing bug that truncated reps), prefer the Excel result
-                    # so newly-parsed reps are not hidden by stale annotations.
-                    if len(excel_actions) > len(saved_actions):
-                        print(
-                            f"[CVSlice] Excel has {len(excel_actions)} actions "
-                            f"vs {len(saved_actions)} saved; using Excel result."
-                        )
-                        self.actions = excel_actions
-                    else:
-                        self.actions = saved_actions
+                    self.actions = saved_actions
             else:
                 print(f"[CVSlice] Discarding {len(saved_actions)} corrupt "
                       f"saved actions for {scene_name!r}, re-parsing Excel.")
@@ -914,6 +905,7 @@ class ClipAnnotator(QMainWindow):
             result = load_csv_as_pts3d(csv_path)
             if result[0] is not None:
                 self.pts3d, self.pts3d_valid, self.pts3d_was_nan, _csv_fps = result
+                self.csv_fps = _csv_fps or DEFAULT_POINTS_FPS
 
         self.cam_combo.blockSignals(True)
         self.cam_combo.clear()
@@ -1026,10 +1018,8 @@ class ClipAnnotator(QMainWindow):
         for a in excel_actions:
             excel_frames.add((a.get("start", 0), a.get("end", 0)))
         overlap = len(saved_frames & excel_frames)
-        print(f"[CVSlice DEBUG] _find_new_reps: saved={len(saved_actions)} excel={len(excel_actions)} overlap={overlap} threshold={len(saved_actions)*0.5}")
         # Need at least 50% of saved actions to match Excel by frame numbers
         if len(saved_actions) > 0 and overlap < len(saved_actions) * 0.5:
-            print(f"[CVSlice DEBUG] Overlap too low, returning [] (no merge popup)")
             return []
 
         new_reps = []
@@ -1233,12 +1223,15 @@ class ClipAnnotator(QMainWindow):
                 f"Failed to load offsets:\n{str(e)}")
 
     def _estimate_pfps(self):
-        if self.pts3d is not None and self.vtotal > 0 and self.vfps > 0:
-            dur = self.vtotal / self.vfps
-            if dur > 0:
-                self.pfps = self.pts3d.shape[0] / dur
-                return
-        self.pfps = DEFAULT_POINTS_FPS
+        """Use mocap CSV frame rate for skeleton timeline.
+
+        The extracted CSV can contain the full OptiTrack take while the video
+        file can be shorter/clipped. Estimating skeleton FPS from
+        len(pts3d) / video_duration creates cumulative drift (e.g. 8.5x for a
+        240fps skeleton vs 30fps video). The mapping should use the mocap export
+        FPS and handle start-time differences via offsets.
+        """
+        self.pfps = self.csv_fps if self.csv_fps and self.csv_fps > 0 else DEFAULT_POINTS_FPS
 
     def _find_video_for_cam(self, cam_name: str) -> str | None:
         """Find the video file for *cam_name* in video_folder, preferring
@@ -2736,6 +2729,13 @@ class ClipAnnotator(QMainWindow):
                     self.cur_scene, cn, ai) for cn in self.avail_cams},
             })
         offset_doc = {
+            "export_metadata": {
+                "exported_at": __import__("datetime").datetime.now().isoformat(),
+                "reference_camera": self.active_cam,
+                "reference_vfps": float(self.vfps) if self.vfps else 30.0,
+                "skeleton_fps": float(self.pfps) if self.pfps else 240.0,
+                "note": "CSV frame counts are based on reference_vfps. Apply view_offsets when visualizing with different cameras."
+            },
             "actor_id": actor_id,
             "scene": self.cur_scene,
             "skeleton_offset": self._skeleton_offset.get(self.cur_scene, 0),
@@ -2819,15 +2819,10 @@ class ClipAnnotator(QMainWindow):
                 fps = cap2.get(cv2.CAP_PROP_FPS) or 30.0
                 w = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
                 h = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                # Recompute pfps for this camera's own frame count.
-                # Each camera may have a slightly different vtotal, so
-                # using self.pfps (from the last-previewed camera) causes
-                # skeleton drift that grows with frame number.
-                if self.pts3d is not None and cam_vtotal > 0 and fps > 0:
-                    cam_dur = cam_vtotal / fps
-                    cam_pfps = self.pts3d.shape[0] / cam_dur if cam_dur > 0 else self.pfps
-                else:
-                    cam_pfps = self.pfps
+                # Use mocap CSV FPS for skeleton mapping. Different cameras may
+                # have slightly different video lengths, but that should be
+                # handled by video/view offsets, not by changing skeleton FPS.
+                cam_pfps = self.pfps
                 out_len = max(1, base_ef - base_sf + 1)
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 

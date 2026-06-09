@@ -385,7 +385,7 @@ class SkeletonCorrector(QMainWindow):
         self._cur_action_idx = idx
 
         # Load CSV
-        pts3d, _valid, was_nan, csv_fps = load_csv_as_pts3d(act["csv"])
+        pts3d, _valid, was_nan = load_csv_as_pts3d(act["csv"])
         if pts3d is None:
             QMessageBox.warning(self, "错误", f"CSV 解析失败: {act['csv']}")
             return
@@ -422,13 +422,9 @@ class SkeletonCorrector(QMainWindow):
         self._raw_vtotal = self.vtotal
         self._view_offsets.clear()
 
-        # Use CSV header frame rate if available, fallback to estimation
-        if csv_fps > 0:
-            self.pfps = csv_fps
-            self.frame_ratio = self.pfps / self.vfps if self.vfps > 0 else 1.0
-            print(f"[DEBUG] CSV fps={csv_fps}, pfps={self.pfps}, vfps={self.vfps}, ratio={self.frame_ratio:.2f}")
-        elif self.vtotal > 1 and pts3d.shape[0] > 1:
-            # Fallback: estimate from video
+        # Estimate skeleton FPS and frame ratio from exported clip
+        if self.vtotal > 1 and pts3d.shape[0] > 1:
+            # Use full-range ratio to avoid off-by-one drift
             self.frame_ratio = (pts3d.shape[0] - 1) / (self.vtotal - 1)
             vid_duration = self.vtotal / self.vfps
             self.pfps = pts3d.shape[0] / vid_duration
@@ -439,6 +435,11 @@ class SkeletonCorrector(QMainWindow):
         else:
             self.pfps = self.vfps
             self.frame_ratio = 1.0
+
+        self.cur_frame = 0
+        self.undo_stack.clear()
+        self.edited_joints.clear()
+        self._selected_joint = None
         self.sel_joint_lbl.setText("选中关节: -")
 
         # Populate camera combos
