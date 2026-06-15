@@ -22,3 +22,8 @@ calibration/
 # Legacy
 cvslice.py
 CVFrame2-v3/
+
+# Editor / timestamped backups
+*.bak
+*.bak_*
+*.backup

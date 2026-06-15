@@ -155,3 +155,60 @@ def load_csv_as_pts3d(csv_path: str) -> tuple[np.ndarray | None, np.ndarray | No
     # Valid mask: frame has at least one originally non-NaN joint
     valid = ~np.all(was_nan, axis=1)
     return pts_filled, valid, was_nan, fps
+
+
+def load_mosh_pkl(pkl_path: str, which: str = "sim"
+                  ) -> tuple[np.ndarray | None, float]:
+    """Load a MoSh++ ``*_stageii.pkl`` as (T, J, 3) marker positions.
+
+    MoSh++ stores per-frame 37-marker data inside
+    ``stageii_debug_details``:
+        - ``markers_orig`` (T, 37, 3): the raw triangulated markers fed into
+          MoSh — identical to the CVSlice export CSV.
+        - ``markers_sim``  list of (37, 3): the markers re-simulated from the
+          fitted SMPL-X body (cleaner, no NaN/jitter).
+
+    Both live in the same world frame as the calibration, so they project
+    correctly with the exported intrinsics/extrinsics.
+
+    Args:
+        pkl_path: path to a ``*_stageii.pkl`` file.
+        which: ``"sim"`` for the fitted markers, ``"orig"`` for the raw input.
+
+    Returns:
+        (pts3d (T, J, 3) float64 | None, fps).  fps comes from
+        ``mocap_frame_rate`` (default 240.0).
+    """
+    import pickle
+
+    try:
+        with open(pkl_path, "rb") as f:
+            d = pickle.load(f, encoding="latin1")
+    except Exception:
+        return None, 240.0
+    if not isinstance(d, dict):
+        return None, 240.0
+    sd = d.get("stageii_debug_details", {}) or {}
+    try:
+        fps = float(sd.get("mocap_frame_rate", 240.0) or 240.0)
+    except Exception:
+        fps = 240.0
+
+    primary = "markers_sim" if which == "sim" else "markers_orig"
+    fallback = "markers_orig" if which == "sim" else "markers_sim"
+    arr = sd.get(primary)
+    if arr is None:
+        arr = sd.get(fallback)
+    if arr is None:
+        return None, fps
+
+    try:
+        if isinstance(arr, list):
+            pts = np.stack([np.asarray(a, dtype=np.float64) for a in arr], 0)
+        else:
+            pts = np.asarray(arr, dtype=np.float64)
+    except Exception:
+        return None, fps
+    if pts.ndim != 3 or pts.shape[2] != 3:
+        return None, fps
+    return pts, fps

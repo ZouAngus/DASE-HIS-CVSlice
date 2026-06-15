@@ -62,6 +62,12 @@ class ClipAnnotator(QMainWindow):
         self.pts3d_was_nan = None   # (T, J) bool: True = originally NaN, now interpolated
         self.pfps = DEFAULT_POINTS_FPS
         self.csv_fps = DEFAULT_POINTS_FPS
+        # Unified-rate guard: once a scene's first camera loads we lock one
+        # reference (vfps, pfps) and reuse it for every camera — live view and
+        # the exported QC "check" overlays — so all views stay aligned to the
+        # single exported CSV. Re-deriving the rate per camera (the old bug)
+        # let non-reference views drift off the CSV they were checking.
+        self._rate_locked = False
         self.calibs: dict = {}
         self.scene_offset = 0
         self.overrides: dict = {}
@@ -156,6 +162,9 @@ class ClipAnnotator(QMainWindow):
         tm = mb.addMenu("Tools")
         tm.addAction("Open Skeleton Corrector...",
                      self._open_skeleton_corrector)
+        tm.addSeparator()
+        tm.addAction("迁移旧版 view offsets 到统一 rate...",
+                     self._migrate_legacy_view_offsets)
 
         root = QWidget(); self.setCentralWidget(root)
         hl = QHBoxLayout(root); hl.setContentsMargins(4, 4, 4, 4)
@@ -972,6 +981,8 @@ class ClipAnnotator(QMainWindow):
         self._cached_frame_idx = -1
         self._cached_frame = None
         self.active_cam = None
+        # New scene: re-lock the reference rate on the next camera load.
+        self._rate_locked = False
 
         if self.avail_cams:
             self._switch_cam(self.avail_cams[0])
@@ -1107,10 +1118,105 @@ class ClipAnnotator(QMainWindow):
             "overrides": {str(k): v for k, v in self.overrides.items()},
             "view_offsets": self._view_offsets.get(self.cur_scene, {}),
             "skeleton_offset": self._skeleton_offset.get(self.cur_scene, 0),
+            # The unified rate this scene's view offsets are tuned against.
+            # Its presence marks the scene as belonging to the rate-unified
+            # tool, so the legacy-offset migration knows to skip it.
+            "pfps": self.pfps,
             "actions": self.actions,
         }
         self._annotations[self.cur_scene] = scene_data
         save_annotations(self.xlsx_path, self._annotations)
+
+    def _migrate_legacy_view_offsets(self):
+        """Manually migrate view offsets tuned in the ORIGINAL CVSlice.
+
+        The original tool drew each camera with that camera's OWN
+        duration-estimated rate ``pfps_v = npts / (vtotal_v / vfps)`` (camera
+        frame counts differ, so the rate differed per camera). This tool maps
+        every camera with one unified rate ``pfps_ref``. For a verified
+        video<->pose pairing to survive the rate change, each camera's video
+        window must shift by, at an action's start frame ``f``::
+
+            delta = (f + skel_off) * (pfps_v - pfps_ref) / pfps_v   [video frames]
+            new_off = old_off - delta
+
+        Scenes already carrying a ``pfps`` key (saved by this tool) are treated
+        as already migrated. Results are written per action row to the SAME
+        ``*_annotations.json`` file (no separate file is created).
+        """
+        scene = self.cur_scene
+        if not scene or not self.xlsx_path:
+            QMessageBox.information(self, "迁移", "请先加载 Excel 和某个场景。")
+            return
+        if self.pts3d is None or not self.avail_cams:
+            QMessageBox.information(
+                self, "迁移", "当前场景没有 3D 点或相机，无法迁移。")
+            return
+        if not getattr(self, "_rate_locked", False):
+            self._estimate_pfps()
+        saved = self._annotations.get(scene, {})
+        if saved.get("pfps") is not None:
+            ans = QMessageBox.question(
+                self, "已是统一 rate",
+                f"场景 '{scene}' 的标注已带有 pfps 标记(可能已迁移或本就由本工具创建)。\n"
+                "仍要按统一 rate 重新计算 view offsets 吗?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if ans != QMessageBox.Yes:
+                return
+
+        pfps_ref = self.pfps
+        vfps = self.vfps if self.vfps > 0 else 30.0
+        skel = self._skeleton_offset.get(scene, 0)
+        npts = self.pts3d.shape[0]
+        migrated: list[tuple[str, int, int, int]] = []
+        vo = self._view_offsets.setdefault(scene, {})
+        for cn in self.avail_cams:
+            vpath = self._find_video_for_cam(cn)
+            if not vpath:
+                continue
+            cap = cv2.VideoCapture(vpath)
+            vtotal_v = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            if vtotal_v <= 0:
+                continue
+            pfps_v = npts / (vtotal_v / vfps)
+            if pfps_v <= 0:
+                continue
+            new_cd: dict[str, int] = {}
+            for row, a in enumerate(self.actions):
+                ov = self.overrides.get(row, {})
+                base_sf = ov.get("start", a.get("start", 0))
+                old = self._get_view_offset_for(scene, cn, row)
+                delta = (base_sf + skel) * (pfps_v - pfps_ref) / pfps_v
+                new = int(round(old - delta))
+                new_cd[str(row)] = new
+                if new != old:
+                    migrated.append((cn, row, old, new))
+            vo[cn] = new_cd
+
+        # Persist to the existing annotations file (stamps "pfps").
+        self._save_scene_state()
+        # Refresh the displayed view-offset spin for the current action.
+        self._suppress_spin = True
+        self.view_off_spin.setValue(self._get_view_offset())
+        self._suppress_spin = False
+        self._show_frame()
+
+        if migrated:
+            preview = "\n".join(
+                f"  动作#{row} {cn}: {old:+d} → {new:+d}"
+                for cn, row, old, new in migrated[:20])
+            more = (f"\n  ... 另有 {len(migrated) - 20} 处"
+                    if len(migrated) > 20 else "")
+            QMessageBox.information(
+                self, "迁移完成",
+                f"场景 '{scene}': 已按统一 rate ({pfps_ref:.4f} Hz) 调整 "
+                f"{len(migrated)} 个 view offset 并保存。\n\n{preview}{more}\n\n"
+                "建议抽查录制靠后的一个动作再导出。")
+        else:
+            QMessageBox.information(
+                self, "迁移完成",
+                f"场景 '{scene}': 所有 offset 改动均 < 0.5 帧,无需调整(已标记)。")
 
     def _save_current_annotations(self):
         if self._save_timer.isActive():
@@ -1231,7 +1337,32 @@ class ClipAnnotator(QMainWindow):
         240fps skeleton vs 30fps video). The mapping should use the mocap export
         FPS and handle start-time differences via offsets.
         """
-        self.pfps = self.csv_fps if self.csv_fps and self.csv_fps > 0 else DEFAULT_POINTS_FPS
+        # Prefer the authoritative Export Frame Rate from the CSV header — it is
+        # camera-independent and exact, so it survives the case where the mocap
+        # CSV covers only part of the take (a duration estimate would collapse
+        # to a wrong low rate). Fall back to a one-camera duration estimate only
+        # if the CSV declared no rate, then to the default.
+        if self.csv_fps and self.csv_fps > 0:
+            self.pfps = float(self.csv_fps)
+            return
+        if self.pts3d is not None and self.vtotal > 0 and self.vfps > 0:
+            dur = self.vtotal / self.vfps
+            if dur > 0:
+                self.pfps = self.pts3d.shape[0] / dur
+                return
+        self.pfps = DEFAULT_POINTS_FPS
+
+    def _lock_scene_rate(self, vfps: float | None = None) -> None:
+        """Lock one reference (vfps, pfps) for the whole scene.
+
+        Called once when the scene's first camera loads. All later camera
+        switches keep this reference instead of re-reading fps per camera, so
+        every view maps video<->skeleton with the same rate as the exported
+        CSV (the "unified rate")."""
+        if vfps and vfps > 0:
+            self.vfps = float(vfps)
+        self._estimate_pfps()
+        self._rate_locked = True
 
     def _find_video_for_cam(self, cam_name: str) -> str | None:
         """Find the video file for *cam_name* in video_folder, preferring
@@ -1261,9 +1392,12 @@ class ClipAnnotator(QMainWindow):
         if vpath:
             self.cap = cv2.VideoCapture(vpath)
             if self.cap.isOpened():
-                self.vfps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+                cam_vfps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
+                # vtotal is per-camera (clip lengths differ); the rate is not.
                 self.vtotal = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                self._estimate_pfps()
+                if not self._rate_locked:
+                    self._lock_scene_rate(cam_vfps)
+                # else: keep the locked reference rate (unified across cameras)
         # Load view offset for this camera. Camera switches should not move
         # the raw clip window; view offset only changes skeleton mapping.
         self._suppress_spin = True
@@ -2738,6 +2872,12 @@ class ClipAnnotator(QMainWindow):
             },
             "actor_id": actor_id,
             "scene": self.cur_scene,
+            # Top-level vfps/pfps record the single unified rate this export was
+            # cut with, so downstream tools can reproduce the exact video<->skeleton
+            # mapping. Their presence also marks the export as rate-fixed (older
+            # CVSlice exports lack a "pfps" key).
+            "vfps": float(self.vfps) if self.vfps else 30.0,
+            "pfps": float(self.pfps) if self.pfps else 240.0,
             "skeleton_offset": self._skeleton_offset.get(self.cur_scene, 0),
             "auto_padding": self.auto_pad_cb.isChecked(),
             "actions": all_offsets,
@@ -2819,10 +2959,11 @@ class ClipAnnotator(QMainWindow):
                 fps = cap2.get(cv2.CAP_PROP_FPS) or 30.0
                 w = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
                 h = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                # Use mocap CSV FPS for skeleton mapping. Different cameras may
-                # have slightly different video lengths, but that should be
-                # handled by video/view offsets, not by changing skeleton FPS.
-                cam_pfps = self.pfps
+                # Skeleton mapping must use the SAME reference rate the CSV was
+                # sliced with (self.vfps / self.pfps), not this camera's own fps.
+                # Different cameras may have slightly different video lengths,
+                # but that is handled by video/view offsets — never by changing
+                # the rate, or the check overlay would drift off the CSV.
                 out_len = max(1, base_ef - base_sf + 1)
                 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
@@ -2863,7 +3004,7 @@ class ClipAnnotator(QMainWindow):
                     canonical_fi = base_sf + step
                     if self.pts3d is not None and ie:
                         intr, extr = ie
-                        pidx = v2p(canonical_fi, fps, cam_pfps,
+                        pidx = v2p(canonical_fi, self.vfps, self.pfps,
                                    self.pts3d.shape[0], cam_skel_off)
                         pts = self.pts3d[pidx]
                         if self.pts3d_valid is not None and self.pts3d_valid[pidx]:
@@ -2875,7 +3016,7 @@ class ClipAnnotator(QMainWindow):
                                     nan_mask = self.pts3d_was_nan[pidx]
                                 draw_skel_with_confidence(chk, proj, nan_mask)
                     t = max(0, fi) / fps
-                    cv2.putText(chk, f"srcF:{fi} canonF:{canonical_fi} P:{v2p(canonical_fi, fps, cam_pfps, self.pts3d.shape[0], cam_skel_off) if self.pts3d is not None else '?'}",
+                    cv2.putText(chk, f"srcF:{fi} canonF:{canonical_fi} P:{v2p(canonical_fi, self.vfps, self.pfps, self.pts3d.shape[0], cam_skel_off) if self.pts3d is not None else '?'}",
                                 (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
                                 (255, 255, 255), 2)
                     chk_writer.write(chk)
