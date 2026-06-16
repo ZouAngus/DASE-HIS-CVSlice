@@ -164,7 +164,7 @@ class ClipAnnotator(QMainWindow):
                      self._open_skeleton_corrector)
         tm.addSeparator()
         tm.addAction("迁移旧版 view offsets 到统一 rate...",
-                     self._migrate_legacy_view_offsets)
+                     lambda: self._migrate_legacy_view_offsets(manual=True))
 
         root = QWidget(); self.setCentralWidget(root)
         hl = QHBoxLayout(root); hl.setContentsMargins(4, 4, 4, 4)
@@ -805,7 +805,19 @@ class ClipAnnotator(QMainWindow):
             self._view_offsets[scene] = {}
             for cam, offset in view_offsets_data.items():
                 self._view_offsets[scene][cam] = {"0": offset}
-        
+
+        # Legacy-export warning: exports from the ORIGINAL CVSlice have no top-level
+        # "pfps" key. Their view offsets were tuned against per-camera rates, which
+        # this tool replaces with one unified rate; this load path only restores
+        # action[0]'s offsets (no per-action history), so it cannot auto-migrate.
+        if "pfps" not in doc:
+            QMessageBox.warning(
+                self, "加载了旧版导出",
+                "该导出文件夹由原版 CVSlice 生成(offsets.json 内无 'pfps' 记录)。\n\n"
+                "其 view offsets 是按各相机独立 rate 调的;本工具使用统一 rate,"
+                "录制靠后的动作可能需要重新核对 view offset 再重新导出。\n\n"
+                "提示:改用 Excel + 已保存标注 的方式加载场景,可启用自动的逐动作偏移迁移。")
+
         # Update UI
         self.scene_combo.blockSignals(True)
         self.scene_combo.clear()
@@ -996,6 +1008,10 @@ class ClipAnnotator(QMainWindow):
             self._cached_frame_idx = 0
 
         self._estimate_pfps()
+        # One-time migration of view offsets loaded from the legacy annotations
+        # file (no "pfps" key) to this tool's unified rate, saved to the fixed
+        # file. No-op for scenes already saved by this tool.
+        self._migrate_legacy_view_offsets()
         if self.actions:
             self.act_list.setCurrentRow(0)
         else:
@@ -1127,8 +1143,8 @@ class ClipAnnotator(QMainWindow):
         self._annotations[self.cur_scene] = scene_data
         save_annotations(self.xlsx_path, self._annotations)
 
-    def _migrate_legacy_view_offsets(self):
-        """Manually migrate view offsets tuned in the ORIGINAL CVSlice.
+    def _migrate_legacy_view_offsets(self, manual: bool = False):
+        """Migrate view offsets tuned in the ORIGINAL CVSlice to the unified rate.
 
         The original tool drew each camera with that camera's OWN
         duration-estimated rate ``pfps_v = npts / (vtotal_v / vfps)`` (camera
@@ -1140,22 +1156,36 @@ class ClipAnnotator(QMainWindow):
             delta = (f + skel_off) * (pfps_v - pfps_ref) / pfps_v   [video frames]
             new_off = old_off - delta
 
-        Scenes already carrying a ``pfps`` key (saved by this tool) are treated
-        as already migrated. Results are written per action row to the SAME
-        ``*_annotations.json`` file (no separate file is created).
+        Called automatically on scene load (``manual=False``): silently skips a
+        fresh scene (nothing tuned to migrate) or one already carrying a
+        ``"pfps"`` key (already on the unified rate). ``manual=True`` (Tools
+        menu) reports the outcome and can re-run an already-migrated scene.
+        Results are saved to the fixed annotations file (the legacy file is
+        never modified).
         """
         scene = self.cur_scene
         if not scene or not self.xlsx_path:
-            QMessageBox.information(self, "迁移", "请先加载 Excel 和某个场景。")
+            if manual:
+                QMessageBox.information(self, "迁移", "请先加载 Excel 和某个场景。")
             return
         if self.pts3d is None or not self.avail_cams:
-            QMessageBox.information(
-                self, "迁移", "当前场景没有 3D 点或相机，无法迁移。")
+            if manual:
+                QMessageBox.information(
+                    self, "迁移", "当前场景没有 3D 点或相机，无法迁移。")
             return
         if not getattr(self, "_rate_locked", False):
             self._estimate_pfps()
-        saved = self._annotations.get(scene, {})
+        saved = self._annotations.get(scene)
+        # A fresh scene with no saved annotations has no tuned offsets to
+        # migrate — migrating would inject bogus offsets, so skip it.
+        if not saved:
+            if manual:
+                QMessageBox.information(
+                    self, "迁移", f"场景 '{scene}' 没有可迁移的旧 offset。")
+            return
         if saved.get("pfps") is not None:
+            if not manual:
+                return  # already on the unified rate
             ans = QMessageBox.question(
                 self, "已是统一 rate",
                 f"场景 '{scene}' 的标注已带有 pfps 标记(可能已迁移或本就由本工具创建)。\n"
@@ -1209,11 +1239,12 @@ class ClipAnnotator(QMainWindow):
             more = (f"\n  ... 另有 {len(migrated) - 20} 处"
                     if len(migrated) > 20 else "")
             QMessageBox.information(
-                self, "迁移完成",
+                self, "旧版偏移已迁移",
                 f"场景 '{scene}': 已按统一 rate ({pfps_ref:.4f} Hz) 调整 "
-                f"{len(migrated)} 个 view offset 并保存。\n\n{preview}{more}\n\n"
+                f"{len(migrated)} 个 view offset 并保存到 *_annotations_fixed.json。\n\n"
+                f"{preview}{more}\n\n原 *_annotations.json 未改动。"
                 "建议抽查录制靠后的一个动作再导出。")
-        else:
+        elif manual:
             QMessageBox.information(
                 self, "迁移完成",
                 f"场景 '{scene}': 所有 offset 改动均 < 0.5 帧,无需调整(已标记)。")

@@ -157,27 +157,15 @@ def load_csv_as_pts3d(csv_path: str) -> tuple[np.ndarray | None, np.ndarray | No
     return pts_filled, valid, was_nan, fps
 
 
-def load_mosh_pkl(pkl_path: str, which: str = "sim"
-                  ) -> tuple[np.ndarray | None, float]:
-    """Load a MoSh++ ``*_stageii.pkl`` as (T, J, 3) marker positions.
-
-    MoSh++ stores per-frame 37-marker data inside
-    ``stageii_debug_details``:
-        - ``markers_orig`` (T, 37, 3): the raw triangulated markers fed into
-          MoSh — identical to the CVSlice export CSV.
-        - ``markers_sim``  list of (37, 3): the markers re-simulated from the
-          fitted SMPL-X body (cleaner, no NaN/jitter).
-
-    Both live in the same world frame as the calibration, so they project
-    correctly with the exported intrinsics/extrinsics.
-
-    Args:
-        pkl_path: path to a ``*_stageii.pkl`` file.
-        which: ``"sim"`` for the fitted markers, ``"orig"`` for the raw input.
+def mosh_pkl_kind(pkl_path: str) -> str:
+    """Probe a MoSh++ ``.pkl`` format without committing to a representation.
 
     Returns:
-        (pts3d (T, J, 3) float64 | None, fps).  fps comes from
-        ``mocap_frame_rate`` (default 240.0).
+        ``"joints"``  — a plain ``(T, J, 3)`` joint array (e.g. SMPL 24-joint
+                        positions baked out by the pipeline);
+        ``"markers"`` — the MoSh dict with ``stageii_debug_details``
+                        (37-marker ``markers_orig`` / ``markers_sim``);
+        ``"unknown"`` — unreadable / unrecognised.
     """
     import pickle
 
@@ -185,6 +173,50 @@ def load_mosh_pkl(pkl_path: str, which: str = "sim"
         with open(pkl_path, "rb") as f:
             d = pickle.load(f, encoding="latin1")
     except Exception:
+        return "unknown"
+    if isinstance(d, np.ndarray) and d.ndim == 3 and d.shape[2] == 3:
+        return "joints"
+    if isinstance(d, dict):
+        return "markers"
+    return "unknown"
+
+
+def load_mosh_pkl(pkl_path: str, which: str = "sim"
+                  ) -> tuple[np.ndarray | None, float]:
+    """Load a MoSh++ ``*_stageii.pkl`` as (T, J, 3) positions.
+
+    Two on-disk formats are supported:
+
+    * **Baked joints** — a plain ``(T, J, 3)`` ndarray (e.g. SMPL 24-joint
+      positions). Returned as-is; ``which`` is ignored.
+    * **MoSh dict** — per-frame 37-marker data inside ``stageii_debug_details``:
+        - ``markers_orig`` (T, 37, 3): raw triangulated markers fed into MoSh —
+          identical to the CVSlice export CSV.
+        - ``markers_sim``  list of (37, 3): markers re-simulated from the fitted
+          SMPL-X body (cleaner, no NaN/jitter).
+
+    All live in the same world frame as the calibration, so they project
+    correctly with the exported intrinsics/extrinsics.
+
+    Args:
+        pkl_path: path to a ``*_stageii.pkl`` file.
+        which: for the dict format, ``"sim"`` (fitted) or ``"orig"`` (raw).
+
+    Returns:
+        (pts3d (T, J, 3) float64 | None, fps).  fps comes from
+        ``mocap_frame_rate`` when present (default 240.0).
+    """
+    import pickle
+
+    try:
+        with open(pkl_path, "rb") as f:
+            d = pickle.load(f, encoding="latin1")
+    except Exception:
+        return None, 240.0
+    # Baked joint array (e.g. SMPL 24-joint positions).
+    if isinstance(d, np.ndarray):
+        if d.ndim == 3 and d.shape[2] == 3:
+            return d.astype(np.float64), 240.0
         return None, 240.0
     if not isinstance(d, dict):
         return None, 240.0

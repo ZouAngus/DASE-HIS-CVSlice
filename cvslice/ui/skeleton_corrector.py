@@ -30,7 +30,7 @@ from PyQt5.QtWidgets import (
 
 from cvslice.core.constants import CAMERA_NAMES
 from cvslice.io.calibration import load_all_calibrations
-from cvslice.io.discovery import load_csv_as_pts3d, load_mosh_pkl
+from cvslice.io.discovery import load_csv_as_pts3d, load_mosh_pkl, mosh_pkl_kind
 from cvslice.ui.video_label import VideoLabel
 from cvslice.vision.adjustment import (
     extract_R_t, find_nearest_joint, get_camera_depth, unproject_2d_to_3d,
@@ -70,9 +70,10 @@ class SkeletonCorrector(QMainWindow):
         self.pfps: float = 0.0                        # skeleton FPS (estimated)
         self.frame_ratio: float = 1.0                 # local CSV frames per video frame
 
-        # Skeleton source: "csv" | "mosh_sim" | "mosh_orig"
+        # Skeleton source: "csv" | "mosh_sim" | "mosh_orig" | "mosh_joints"
         self._skel_source: str = "csv"
         self._mosh_dir: str | None = None
+        self._mosh_kind_cache: dict[str, str] = {}  # pkl path -> "joints"|"markers"
 
         # Action list parsed from folder. Each entry:
         #   {"tag": str, "csv": path|None, "videos": {cam: path}, "pkl": path|None}
@@ -515,14 +516,30 @@ class SkeletonCorrector(QMainWindow):
             self.play_btn.setChecked(True)
 
     # --------------------------------------------------------- skeleton src
+    def _mosh_kind(self, pkl: str) -> str:
+        """Cached probe of a pkl's format ("joints" / "markers" / "unknown")."""
+        kind = self._mosh_kind_cache.get(pkl)
+        if kind is None:
+            kind = mosh_pkl_kind(pkl)
+            self._mosh_kind_cache[pkl] = kind
+        return kind
+
     def _available_sources(self, act: dict) -> list[tuple[str, str]]:
-        """Return [(key, label)] of skeleton sources available for *act*."""
+        """Return [(key, label)] of skeleton sources available for *act*.
+
+        The pkl format decides the mosh options: a baked joint array offers a
+        single "mosh: 关节" source; a MoSh marker dict offers fitted/raw."""
         srcs: list[tuple[str, str]] = []
         if act.get("csv"):
             srcs.append(("csv", "CSV"))
-        if act.get("pkl"):
-            srcs.append(("mosh_sim", "mosh: 拟合"))
-            srcs.append(("mosh_orig", "mosh: 原始"))
+        pkl = act.get("pkl")
+        if pkl:
+            kind = self._mosh_kind(pkl)
+            if kind == "joints":
+                srcs.append(("mosh_joints", "mosh: 关节"))
+            elif kind == "markers":
+                srcs.append(("mosh_sim", "mosh: 拟合"))
+                srcs.append(("mosh_orig", "mosh: 原始"))
         return srcs
 
     def _load_skeleton(self, act: dict, source: str):
@@ -532,7 +549,8 @@ class SkeletonCorrector(QMainWindow):
         Returns (pts3d | None, was_nan | None, fps, used_source).
         """
         if source.startswith("mosh") and act.get("pkl"):
-            which = "sim" if source == "mosh_sim" else "orig"
+            # "orig" only for the marker-dict format; joints/sim use the default.
+            which = "orig" if source == "mosh_orig" else "sim"
             pts, fps = load_mosh_pkl(act["pkl"], which)
             if pts is not None:
                 return pts, None, fps, source
@@ -1143,6 +1161,13 @@ class SkeletonCorrector(QMainWindow):
             o, i = cams[c["cam"]][c["pidx"]]
             o.append(c["obj"]); i.append(c["img"])
 
+        # Refined calibration is written to a fresh timestamped folder inside
+        # the export dir — never the source calibration nor the original copy,
+        # and each run is distinguishable by its name.
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_dir = os.path.join(self.folder or ".", f"calibration_refined_{ts}")
+
         lines: list[str] = []
         wrote = 0
         for cam, by_pidx in cams.items():
@@ -1176,36 +1201,42 @@ class SkeletonCorrector(QMainWindow):
                    f"({r['n_points']}点/{r['n_frames']}帧)")
             if not r["improved"]:
                 lines.append(tag + "  未改善,未写入"); continue
-            # Apply refined params to the in-memory dicts and persist files.
+            # Apply refined params to the in-memory dicts so the live view
+            # updates immediately.
             intr["camera_matrix"] = r["K"].tolist()
             intr["dist_coeffs"] = [r["dist"].tolist()]
             extr["best_extrinsic"] = extrinsic_matrix_from_rt(r["rvec"], r["tvec"])
             extr["dist_coeffs"] = r["dist"].tolist()
+            # Write to the timestamped copy folder, keeping original filenames.
             intr_p, extr_p = self._calib_files_for_cam(cam)
-            self._write_calib_file(intr_p, intr)
-            self._write_calib_file(extr_p, extr)
+            if not os.path.isdir(out_dir):
+                try:
+                    os.makedirs(out_dir, exist_ok=True)
+                except Exception as e:
+                    QMessageBox.warning(self, "标定精修", f"无法创建输出目录: {e}")
+                    return
+            if intr_p:
+                self._write_calib_file(
+                    os.path.join(out_dir, os.path.basename(intr_p)), intr)
+            if extr_p:
+                self._write_calib_file(
+                    os.path.join(out_dir, os.path.basename(extr_p)), extr)
             wrote += 1
-            lines.append(tag + "  ✓已保存")
+            lines.append(tag + "  ✓")
 
         clear_projection_cache()
         self._show_frame()
         self.calib_result_lbl.setText("\n".join(lines))
+        where = (f"\n\n已写入副本目录:\n{os.path.basename(out_dir)}\n"
+                 "(源标定与原 calibration/ 副本均未改动)") if wrote else ""
         QMessageBox.information(
             self, "标定精修完成",
-            f"已精修并写入 {wrote} 个相机的标定 (原文件备份为 .bak)。\n\n"
-            + "\n".join(lines))
+            f"已精修 {wrote} 个相机的标定。{where}\n\n" + "\n".join(lines))
 
     @staticmethod
     def _write_calib_file(path: str | None, data: dict) -> None:
         if not path:
             return
-        bak = path + ".bak"
-        if os.path.exists(path) and not os.path.exists(bak):
-            try:
-                import shutil
-                shutil.copy2(path, bak)
-            except Exception:
-                pass
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=1, ensure_ascii=False)

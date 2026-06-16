@@ -42,18 +42,33 @@ differs slightly, e.g. 29.97 vs 30.0).
 - **Skeleton Corrector is unaffected by design** — it maps via a single per-action
   `frame_ratio = (T-1)/(vtotal-1)`, which is camera-independent.
 
-### Legacy view-offset migration (optional)
-**Tools → 迁移旧版 view offsets 到统一 rate...** recomputes view offsets that were tuned
-under the old per-camera rate to the unified rate, per action row
-(`delta = (start + skel) * (pfps_v − pfps_ref) / pfps_v`), and writes back to the same
-`*_annotations.json`. Scenes saved by the fixed tool carry a `pfps` key and are skipped.
-Matters because old annotations used a per-camera **duration** estimate, and camera frame
-counts differ (e.g. 49135 vs 49153), so alignments drift ~10+ frames late in a take.
+### Backward-compatibility scaffolding (separate file + migration + warning)
+Because this tool's unified-rate view offsets are not interchangeable with the original
+CVSlice's per-camera ones, three safeguards keep old data from being corrupted or
+silently misread:
+
+- **Separate annotations file** (`io/annotations.py`): saves go to
+  `*_annotations_fixed.json`; the original `*_annotations.json` is read **only** as a
+  fallback when no fixed file exists yet, and is never written.
+- **Automatic view-offset migration** (`_migrate_legacy_view_offsets`): on scene load,
+  offsets read from the legacy file (no `pfps` key) are recomputed to the unified rate
+  per action row — `delta = (start + skel) * (pfps_v − pfps_ref) / pfps_v` — and saved to
+  the fixed file. Fresh scenes (nothing tuned) and already-migrated scenes (carry a
+  `pfps` key) are skipped. Re-run manually via **Tools → 迁移旧版 view offsets 到统一 rate**.
+  Matters because old annotations used a per-camera **duration** estimate and camera frame
+  counts differ (e.g. 49135 vs 49153), so alignments drift ~10+ frames late in a take.
+- **Legacy-export warning**: loading an exported folder whose `offsets.json` lacks a
+  top-level `pfps` (made by the original CVSlice) pops a notice to re-check view offsets.
 
 ### Skeleton Corrector — new capabilities
-- **MoSh++ `.pkl` loading** — reads `data/mosh/.../<tag>_stageii.pkl`. A **数据源** dropdown
-  switches between CSV / `markers_sim` (fitted, default) / `markers_orig` (raw, identical
-  to the export CSV). Link a mosh dir via **File → 关联 mosh 目录...**.
+- **MoSh++ `.pkl` loading** — link a mosh dir via **File → 关联 mosh 目录...**; pkls are
+  matched to actions by tag. The loader auto-detects the format and the **数据源** dropdown
+  adapts:
+  - baked joint array `(T, J, 3)` (e.g. SMPL 24-joint positions) → single `mosh: 关节`;
+  - MoSh marker dict → `mosh: 拟合` (fitted `markers_sim`) / `mosh: 原始` (raw
+    `markers_orig`, identical to the export CSV).
+  All are in the calibration world frame, so they project directly (24-joint data uses the
+  `JOINT_PAIRS_24` topology, 37-marker data uses `JOINT_PAIRS_37`).
 - **Skeleton-time offset (±10)** + per-camera view offsets (±10) for fine alignment.
 - **Progress save** — `corrector_progress.json` stores per-action source/offsets/edited
   joints; auto-loaded on open (Ctrl+Shift+S).
@@ -67,7 +82,9 @@ Skeleton Corrector's **标定精修** mode, drag each projected joint to its tru
 collect 2D↔3D correspondences across frames/cameras, then bundle-adjust the camera
 (`vision/calib_refine.py`, OpenCV `calibrateCamera` + `solvePnP` — no SciPy). Optimizes
 intrinsics + distortion + extrinsics (or extrinsics-only); never writes a result that
-doesn't reduce reprojection error; backs up originals to `.bak`.
+doesn't reduce reprojection error. Refined files are written to a **new timestamped
+folder** `calibration_refined_<YYYYMMDD_HHMMSS>/` inside the export dir — the source
+calibration (`Codes/calibration`) and the original `calibration/` copy are never modified.
 
 ---
 
@@ -196,8 +213,13 @@ def v2p(vf: int, vfps: float, pfps: float, ptot: int, off: int = 0) -> int:
 
 ## annotations.json — Offset Storage Format
 
-The annotation file is stored as a JSON sidecar next to the Excel file:
-- `DataCollection_13.xlsx` → `DataCollection_13_annotations.json`
+The annotation file is stored as a JSON sidecar next to the Excel file. This
+(rate-unified) tool writes to a **separate `*_annotations_fixed.json`** file and reads
+the original `*_annotations.json` only as a read-only fallback (see *Latest Changes*):
+- `DataCollection_13.xlsx` → `DataCollection_13_annotations_fixed.json` (written)
+- `DataCollection_13.xlsx` → `DataCollection_13_annotations.json` (legacy, read-only)
+
+A scene that carries a `pfps` key has been saved/migrated by this tool.
 
 ### Structure
 
