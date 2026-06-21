@@ -60,4 +60,26 @@ JOINT_PAIRS_37 = [
 
 JOINT_PAIRS_MAP = {17: JOINT_PAIRS_17, 24: JOINT_PAIRS_24, 37: JOINT_PAIRS_37}
 
-PT_COLOR = (0, 0, 255)
+# Left / right limb joints per topology, for SMPL-style side coloring.
+# Only the limbs are colored; spine / head / pelvis / collars are center, so
+# the connector bones (pelvis->hip, spine->collar->shoulder) stay center too.
+# SMPL 24-joint: left limbs 1/4/7/10 (leg) + 16/18/20/22 (arm). Collars 13/14
+# are center (the upper "V" is blue in the reference figure).
+_LEFT_24 = {1, 4, 7, 10, 16, 18, 20, 22}
+_RIGHT_24 = {2, 5, 8, 11, 17, 19, 21, 23}
+# Human3.6M-style 17-joint: 1-3 right leg, 4-6 left leg, 11-13 left arm,
+# 14-16 right arm; 0/7/8/9/10 are center.
+_LEFT_17 = {4, 5, 6, 11, 12, 13}
+_RIGHT_17 = {1, 2, 3, 14, 15, 16}
+# 37-marker MoSh/SOMA layout (names in the JOINT_PAIRS_37 comment): L* limb
+# markers vs R* limb markers (waist/back markers stay center).
+_LEFT_37 = {11, 12, 13, 14, 15, 16, 17, 25, 26, 27, 28, 29, 30}
+_RIGHT_37 = {18, 19, 20, 21, 22, 23, 24, 31, 32, 33, 34, 35, 36}
+
+LEFT_JOINTS = {17: _LEFT_17, 24: _LEFT_24, 37: _LEFT_37}
+RIGHT_JOINTS = {17: _RIGHT_17, 24: _RIGHT_24, 37: _RIGHT_37}
+
+PT_COLOR = (0, 0, 255)            # default / unknown topology (red, BGR)
+LEFT_COLOR = (0, 0, 255)          # left limbs  — red   (BGR)
+RIGHT_COLOR = (0, 255, 0)         # right limbs — green (BGR)
+CENTER_COLOR = (255, 0, 0)        # spine / head / pelvis / collars — blue (BGR)

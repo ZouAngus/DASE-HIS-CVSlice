@@ -61,6 +61,10 @@ silently misread:
   top-level `pfps` (made by the original CVSlice) pops a notice to re-check view offsets.
 
 ### Skeleton Corrector — new capabilities
+- **Actor-folder loading** — open an actor/export folder (e.g. `15_export_37`) and a
+  **场景** dropdown lists its scene subfolders (`15-boss`, `15-elsdon`, …); switching scene
+  reloads that scene's calibration + actions. Opening a single scene folder still works
+  (handled as a one-scene actor).
 - **MoSh++ `.pkl` loading** — link a mosh dir via **File → 关联 mosh 目录...**; pkls are
   matched to actions by tag. The loader auto-detects the format and the **数据源** dropdown
   adapts:
@@ -334,11 +338,21 @@ Excel 标注的 start/end 帧号（骨骼帧）可能不精确。用户在界面
 
 ### Skeleton Corrector Mode
 
-Launch: `python main.py --correct [exported_folder]`
+Launch: `python main.py --correct [actor_or_scene_folder]`
 
 This mode is for **post-export 3D joint refinement**:
+- **Actor folder** input → **场景** dropdown over its scene subfolders (or pass a single
+  scene folder directly)
 - Dual-view layout (top + bottom camera simultaneously)
-- Skeleton source: CSV or MoSh++ `.pkl` (`markers_sim` / `markers_orig`)
+- Skeleton source: defaults to the **MoSh/SMPL skeleton** when a pkl is linked (CSV is
+  reference); 24-joint array, or `markers_sim` / `markers_orig`
+- **Keyframes**: mark corrected frames (**K**), then interpolate all joints between them
+  (spline/linear) to smooth the frames in between
+- **Save → PKL** when editing a MoSh/SMPL source (the primary output, written as a plain
+  `(T, J, 3)` float32 array, default name `<tag>_edited.pkl`); CSV source still saves CSV
+- Keys: **Space** play/pause · **A/D** frame ± · **Q/E** top-view camera · **Z/C** bottom-view
+  camera · **W/S** switch action · **K** add keyframe (routed app-wide so they keep working
+  after a joint edit)
 - Click-drag joints to move them in 3D space
 - Skeleton-time offset (±10) + per-camera view offsets (±10)
 - Undo stack (Ctrl+Z) and temporal Gaussian smoothing

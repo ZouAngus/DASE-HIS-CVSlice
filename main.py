@@ -1,6 +1,17 @@
 """CVSlice entry point."""
 import sys
 import os
+
+# Pre-load native ML runtimes (onnxruntime, used by the RTMPose 2D-pose
+# backend) BEFORE PyQt5. On Windows, importing such native extensions *after*
+# Qt fails with "DLL initialization routine failed" (Qt clobbers the DLL
+# search path); importing them first avoids it. Best-effort: if not installed,
+# the optional 2D-pose calibration features simply stay unavailable.
+try:
+    import onnxruntime  # noqa: F401
+except Exception:
+    pass
+
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QFont, QFontDatabase
 from PyQt5.QtCore import Qt

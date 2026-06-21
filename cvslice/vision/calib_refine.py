@@ -42,12 +42,19 @@ def _reproj_rmse(obj: np.ndarray, img: np.ndarray, K, dist, rvec, tvec) -> float
     return float(np.sqrt(np.mean(np.sum(d * d, axis=1))))
 
 
+def _point_residuals(obj, img, K, dist, rvec, tvec) -> np.ndarray:
+    """Per-point reprojection error (pixels)."""
+    proj, _ = cv2.projectPoints(obj.reshape(-1, 1, 3), rvec, tvec,
+                                K, np.asarray(dist).reshape(1, -1))
+    return np.linalg.norm(proj.reshape(-1, 2) - img.reshape(-1, 2), axis=1)
+
+
 def refine_camera(obj_by_frame: list[np.ndarray],
                   img_by_frame: list[np.ndarray],
                   K0: np.ndarray, dist0: np.ndarray,
                   rvec0: np.ndarray, tvec0: np.ndarray,
                   image_size: tuple[int, int],
-                  mode: str = "full") -> dict:
+                  mode: str = "full", rational: bool = False) -> dict:
     """Refine one camera from per-frame 2D-3D correspondences.
 
     Args:
@@ -57,6 +64,10 @@ def refine_camera(obj_by_frame: list[np.ndarray],
         rvec0, tvec0: current extrinsic as Rodrigues vec (3,) and tvec (3,).
         image_size: (width, height) in pixels.
         mode: "full" (K+dist+pose) or "extrinsic" (pose only).
+        rational: in "full" mode, also try the 8-param rational distortion
+            model (k1..k6) — needed to fit wide-angle / fisheye edge
+            distortion that the 5-param Brown model can't. The best-RMSE
+            candidate (extrinsic / full / full-rational) is kept.
 
     Returns a dict:
         ok, reason, mode_used, n_points, n_frames,
@@ -92,51 +103,99 @@ def refine_camera(obj_by_frame: list[np.ndarray],
         result["reason"] = f"correspondences too few ({n_points} < {MIN_POINTS})"
         return result
 
-    result["rmse_before"] = _reproj_rmse(obj_all, img_all, K0, dist0, rvec0, tvec0)
-
-    K = K0.copy()
-    dist = dist0.copy()
-    mode_used = mode
-
-    # --- Optional intrinsics + distortion refine -------------------------
-    if mode == "full":
-        if n_frames < MIN_VIEWS_FOR_INTRINSICS:
-            # Not enough independent views to trust intrinsics; fall back.
-            mode_used = "extrinsic"
-        else:
-            objs = [o.astype(np.float32).reshape(-1, 1, 3) for o in obj_by_frame]
-            imgs = [i.astype(np.float32).reshape(-1, 1, 2) for i in img_by_frame]
-            flags = cv2.CALIB_USE_INTRINSIC_GUESS
-            try:
-                ret, Kc, distc, _rv, _tv = cv2.calibrateCamera(
-                    objs, imgs, tuple(int(s) for s in image_size),
-                    K0.copy(), dist0.copy().reshape(1, -1), flags=flags)
-                if np.all(np.isfinite(Kc)) and np.all(np.isfinite(distc)):
-                    K, dist = Kc, distc.reshape(-1)
-            except cv2.error:
-                mode_used = "extrinsic"  # solver failed; keep K/dist
-
-    # --- Pose refine (always) -------------------------------------------
-    ok, rvec, tvec = cv2.solvePnP(
+    # --- Robust inlier selection -----------------------------------------
+    # Auto 2D detections produce outliers (left/right swaps, occluded joints).
+    # An initial pose lets us drop gross outliers (MAD rule) so the refine
+    # isn't dragged by them — this is what lets the distortion fit actually
+    # help instead of fighting noise.
+    ok0, rvi, tvi = cv2.solvePnP(
         obj_all.reshape(-1, 1, 3), img_all.reshape(-1, 1, 2),
-        K, dist.reshape(1, -1), rvec0.copy(), tvec0.copy(),
+        K0, dist0.reshape(1, -1), rvec0.copy(), tvec0.copy(),
         useExtrinsicGuess=True, flags=cv2.SOLVEPNP_ITERATIVE)
-    if not ok:
+    if ok0:
+        res0 = _point_residuals(obj_all, img_all, K0, dist0, rvi, tvi)
+        med = float(np.median(res0))
+        mad = float(np.median(np.abs(res0 - med))) + 1e-6
+        keep = res0 <= max(med + 2.5 * mad, 8.0)
+        if keep.sum() >= MIN_POINTS and keep.mean() >= 0.3:
+            new_obj, new_img, off = [], [], 0
+            for o, im in zip(obj_by_frame, img_by_frame):
+                m = keep[off:off + len(o)]
+                off += len(o)
+                if m.any():
+                    new_obj.append(o[m])
+                    new_img.append(im[m])
+            obj_by_frame, img_by_frame = new_obj, new_img
+            obj_all = np.concatenate(obj_by_frame, axis=0)
+            img_all = np.concatenate(img_by_frame, axis=0)
+            n_points, n_frames = len(obj_all), len(obj_by_frame)
+            result["n_points"], result["n_frames"] = n_points, n_frames
+
+    rmse_before = _reproj_rmse(obj_all, img_all, K0, dist0, rvec0, tvec0)
+    result["rmse_before"] = rmse_before
+
+    def _solve_pose(K, dist):
+        """solvePnP (+ LM refine) over all pooled points; return (rvec, tvec,
+        rmse) or None on failure."""
+        ok, rvec, tvec = cv2.solvePnP(
+            obj_all.reshape(-1, 1, 3), img_all.reshape(-1, 1, 2),
+            K, dist.reshape(1, -1), rvec0.copy(), tvec0.copy(),
+            useExtrinsicGuess=True, flags=cv2.SOLVEPNP_ITERATIVE)
+        if not ok:
+            return None
+        try:
+            rvec, tvec = cv2.solvePnPRefineLM(
+                obj_all.reshape(-1, 1, 3), img_all.reshape(-1, 1, 2),
+                K, dist.reshape(1, -1), rvec, tvec)
+        except cv2.error:
+            pass
+        return rvec, tvec, _reproj_rmse(obj_all, img_all, K, dist, rvec, tvec)
+
+    # Build candidate solutions and keep whichever minimises reprojection.
+    # The extrinsic-only solve is always safe (solvePnP can't do worse than
+    # the initial guess); the full intrinsics refit can over-fit sparse,
+    # moving-subject data (esp. fisheye), so we never blindly trust it.
+    candidates = []  # (mode_used, K, dist, rvec, tvec, rmse)
+
+    r = _solve_pose(K0, dist0)
+    if r is not None:
+        candidates.append(("extrinsic", K0, dist0, r[0], r[1], r[2]))
+
+    if mode == "full" and n_frames >= MIN_VIEWS_FOR_INTRINSICS:
+        objs = [o.astype(np.float32).reshape(-1, 1, 3) for o in obj_by_frame]
+        imgs = [i.astype(np.float32).reshape(-1, 1, 2) for i in img_by_frame]
+        imsz = tuple(int(s) for s in image_size)
+
+        def _calib(flags, ncoef, label):
+            d0 = np.pad(dist0, (0, max(0, ncoef - dist0.size)))[:ncoef]
+            try:
+                _ret, Kc, distc, _rv, _tv = cv2.calibrateCamera(
+                    objs, imgs, imsz, K0.copy(), d0.reshape(1, -1), flags=flags)
+            except cv2.error:
+                return
+            if not (np.all(np.isfinite(Kc)) and np.all(np.isfinite(distc))):
+                return
+            rf = _solve_pose(Kc, distc.reshape(-1))
+            if rf is not None:
+                candidates.append((label, Kc, distc.reshape(-1),
+                                   rf[0], rf[1], rf[2]))
+
+        _calib(cv2.CALIB_USE_INTRINSIC_GUESS, 5, "full")
+        if rational:
+            _calib(cv2.CALIB_USE_INTRINSIC_GUESS | cv2.CALIB_RATIONAL_MODEL,
+                   8, "full+rational")
+
+    if not candidates:
         result["reason"] = "solvePnP failed"
         return result
-    try:
-        rvec, tvec = cv2.solvePnPRefineLM(
-            obj_all.reshape(-1, 1, 3), img_all.reshape(-1, 1, 2),
-            K, dist.reshape(1, -1), rvec, tvec)
-    except cv2.error:
-        pass
 
-    rmse_after = _reproj_rmse(obj_all, img_all, K, dist, rvec, tvec)
+    mode_used, K, dist, rvec, tvec, rmse_after = min(
+        candidates, key=lambda c: c[5])
     result.update({
         "ok": True, "mode_used": mode_used,
         "rmse_after": rmse_after,
-        "improved": rmse_after < result["rmse_before"],
-        "K": K, "dist": dist.reshape(-1),
+        "improved": rmse_after < rmse_before,
+        "K": np.asarray(K, dtype=np.float64), "dist": np.asarray(dist).reshape(-1),
         "rvec": np.asarray(rvec).reshape(3), "tvec": np.asarray(tvec).reshape(3),
     })
     return result
