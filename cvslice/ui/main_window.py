@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import Qt, QTimer, QCoreApplication
 
+from ..core import appconfig
 from ..core.constants import CAMERA_NAMES, DEFAULT_POINTS_FPS
 from ..core.utils import fmt_time, v2p, make_label
 from ..io import (
@@ -130,6 +131,15 @@ class ClipAnnotator(QMainWindow):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(500)
         self._save_timer.timeout.connect(self._do_save)
+
+        # Restore the last data-root directory used (convenience across runs).
+        cached = appconfig.get_dir("clip_annotator_dir")
+        if cached:
+            self.data_root = cached
+            self.lbl_data.setText(os.path.basename(cached))
+            if self.cur_scene:
+                self._apply_scene(self.cur_scene)
+            self.statusBar().showMessage(f"Data root (restored): {cached}")
 
     # =======================================================================
     #  UI construction
@@ -698,6 +708,7 @@ class ClipAnnotator(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Select Data Root Folder")
         if not folder: return
         self.data_root = folder
+        appconfig.set_dir("clip_annotator_dir", folder)
         self.lbl_data.setText(os.path.basename(folder))
         if self.cur_scene:
             self._apply_scene(self.cur_scene)

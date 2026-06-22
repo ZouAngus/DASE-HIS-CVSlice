@@ -40,6 +40,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
+from cvslice.core import appconfig
 from cvslice.core.constants import CAMERA_NAMES, JOINT_PAIRS_MAP
 from cvslice.core.timeline import Timeline
 from cvslice.io.calibration import load_all_calibrations
@@ -178,6 +179,11 @@ class SkeletonCorrector(QMainWindow):
 
         if folder:
             self._open_folder(folder)
+        else:
+            # Re-open the last directory used (if it still has scenes).
+            cached = appconfig.get_dir("skeleton_corrector_dir")
+            if cached and self._discover_scenes(cached):
+                self._open_folder(cached)
 
     # --- frame-mapping facade: keep the old attribute names, one source of truth
     @property
@@ -388,10 +394,12 @@ class SkeletonCorrector(QMainWindow):
         kf_method_row.addWidget(self.kf_method, 1)
         kfl.addLayout(kf_method_row)
         self.auto_kf_cb = QCheckBox("编辑某帧后自动添加为关键帧")
+        self.auto_kf_cb.setChecked(True)
         kfl.addWidget(self.auto_kf_cb)
         self.seed_kf_cb = QCheckBox("新建关键帧时用插值预填(对着预测微调)")
         kfl.addWidget(self.seed_kf_cb)
         self.onion_cb = QCheckBox("洋葱皮: 显示前/后关键帧残影")
+        self.onion_cb.setChecked(True)
         self.onion_cb.toggled.connect(lambda _=False: self._show_frame())
         kfl.addWidget(self.onion_cb)
         smooth_row = QHBoxLayout()
@@ -680,6 +688,7 @@ class SkeletonCorrector(QMainWindow):
             return
 
         self._actor_folder = folder
+        appconfig.set_dir("skeleton_corrector_dir", folder)
         self._scenes = scenes
         self.scene_combo.blockSignals(True)
         self.scene_combo.clear()
