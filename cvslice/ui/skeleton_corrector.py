@@ -476,6 +476,15 @@ class SkeletonCorrector(QMainWindow):
         ug.addWidget(un_btn)
         self.undo_lbl = QLabel("撤销步数: 0")
         ug.addWidget(self.undo_lbl)
+        reset_btn = QPushButton("↺ 一键还原未调整骨骼")
+        reset_btn.setStyleSheet("font-weight:bold;")
+        reset_btn.clicked.connect(self._reset_all)
+        ug.addWidget(reset_btn)
+        reset_h = QLabel("把当前动作的骨骼恢复到加载时(未调整)的状态,清空所有"
+                         "编辑/关键帧。可 Ctrl+Z 撤销。")
+        reset_h.setWordWrap(True)
+        reset_h.setStyleSheet("color:#888;")
+        ug.addWidget(reset_h)
         rp.addWidget(un_g)
 
         rp.addStretch()
@@ -1521,19 +1530,27 @@ class SkeletonCorrector(QMainWindow):
         self.undo_lbl.setText(f"撤销步数: {len(self.undo_stack)}")
 
     def _reset_all(self) -> None:
+        """Restore the skeleton to its as-loaded (unedited) state: revert all
+        3D points to the pristine source, drop edited-joint marks and keyframes.
+        Undoable."""
         if self.pts3d is None or self.pts3d_orig is None:
             return
         ans = QMessageBox.question(
             self, "确认",
-            "恢复所有 3D 点到加载时的状态?\n(可撤销)",
+            "一键还原:把骨骼恢复到加载时(未调整)的状态?\n"
+            "(清空所有编辑/关键帧,可用 Ctrl+Z 撤销)",
             QMessageBox.Yes | QMessageBox.No)
         if ans != QMessageBox.Yes:
             return
         self._push_undo()
         self.pts3d = self.pts3d_orig.copy()
         self.edited_joints.clear()
+        self._keyframes.clear()
+        self._tv2d.clear()
         self._refresh_edited_list()
+        self._refresh_kf_list()
         self._show_frame()
+        self.statusBar().showMessage("已还原到未调整的骨骼状态(可 Ctrl+Z 撤销)")
 
     # ------------------------------------------------- calibration refine
     def _on_calib_mode_changed(self, _state: int) -> None:
