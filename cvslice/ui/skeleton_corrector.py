@@ -87,6 +87,12 @@ class SkeletonCorrector(QMainWindow):
         self._cap_totals: dict[str, int] = {}         # cam -> frame count (cached)
         self.vfps: float = 30.0
         self.vtotal: int = 0                          # video frame count (timeline)
+        self._raw_vtotal: int = 0                     # untrimmed clip length
+        # Playable video-frame window [lo, hi]: the intersection where every
+        # camera (with its view offset) has a real frame AND the skeleton maps
+        # in-range without clamping — no black / duplicate frames.
+        self._play_lo: int = 0
+        self._play_hi: int = 0
         self.cur_frame: int = 0                       # video frame index
         # Frame mapping (video<->skeleton). pfps / frame_ratio / _skel_offset
         # are read & written through this single object via the properties
@@ -982,12 +988,12 @@ class SkeletonCorrector(QMainWindow):
         self.cam_top_combo.blockSignals(False)
         self.cam_bot_combo.blockSignals(False)
         self._sync_vo_spins()
-        self._recalc_vtotal()
         self._refresh_source_combo()
 
-        self.slider.setRange(0, max(0, self.vtotal - 1))
         if keep_frame is not None:
-            self.cur_frame = max(0, min(self.vtotal - 1, keep_frame))
+            self.cur_frame = keep_frame
+        # Set the playable window (clamps cur_frame into it, sets slider range).
+        self._recalc_play_range()
         self.slider.setValue(self.cur_frame)
         self._refresh_edited_list()
         self._refresh_kf_list()
@@ -1175,7 +1181,7 @@ class SkeletonCorrector(QMainWindow):
         pidx = self._v2p(self.cur_frame)
         ratio_str = f"  skel:{pidx}" if abs(self.pfps - self.vfps) > 0.1 else ""
         self.frame_lbl.setText(
-            f"{self.cur_frame} / {max(0, self.vtotal - 1)}{ratio_str}")
+            f"{self.cur_frame} / {self._play_hi}  [{self._play_lo}–{self._play_hi}]{ratio_str}")
         # Camera-triangulated preview: compute current frame on demand while
         # paused (too slow to run every playback tick).
         if (self._auto_preview and self._pose2d is not None
@@ -2883,7 +2889,7 @@ class SkeletonCorrector(QMainWindow):
         kfs = sorted(self._keyframes)
         row = self.kf_list.row(item)
         if 0 <= row < len(kfs):
-            self.cur_frame = max(0, min(self.vtotal - 1, self._p2v(kfs[row])))
+            self.cur_frame = max(self._play_lo, min(self._play_hi, self._p2v(kfs[row])))
             self.slider.setValue(self.cur_frame)
 
     def _interp_keyframes(self) -> None:
@@ -2966,6 +2972,7 @@ class SkeletonCorrector(QMainWindow):
     def _on_skel_offset_changed(self, val: int = 0) -> None:
         """Shift the skeleton in time relative to the video (±10 frames)."""
         self._skel_offset = max(-10, min(10, int(val)))
+        self._recalc_play_range()   # skel offset changes the skeleton's valid range
         self._show_frame()
 
     def _on_view_offset_changed(self, _val: int = 0) -> None:
@@ -2976,38 +2983,49 @@ class SkeletonCorrector(QMainWindow):
             self._view_offsets[top_cam] = self.vo_top_spin.value()
         if bot_cam:
             self._view_offsets[bot_cam] = self.vo_bot_spin.value()
-        self._recalc_vtotal()
+        self._recalc_play_range()
         self._show_frame()
 
-    def _recalc_vtotal(self) -> None:
-        """Recalculate effective vtotal considering view offsets.
+    def _recalc_play_range(self) -> None:
+        """Compute the playable video-frame window [lo, hi] and apply it.
 
-        If an offset pushes a camera out of range, trim the timeline so
-        no blank frames appear."""
-        if self._raw_vtotal <= 0:
+        Takes the SHORTEST across all views + the skeleton: for every camera the
+        offset-shifted read ``fi + off`` must land in ``[0, cam_total-1]``, and
+        the skeleton frame ``round((fi + skel_offset) * ratio)`` must land in
+        ``[0, n_skel-1]`` WITHOUT clamping. Result: no view shows a black frame
+        and the skeleton never holds a duplicate frame at the ends."""
+        raw = self._raw_vtotal
+        if raw <= 0:
             return
-        # For each active camera with a cap, compute valid range
-        max_start = 0
-        min_end = self._raw_vtotal - 1
+        lo, hi = 0, raw - 1
         for cn, cap in self.caps.items():
             off = self._view_offsets.get(cn, 0)
-            cam_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if cam_total <= 0:
+            tot = self._cap_totals.get(cn) or int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if tot <= 0:
                 continue
-            # Video frame fi + off must be in [0, cam_total-1]
-            # fi >= -off  =>  fi >= max(0, -off)
-            # fi + off < cam_total  =>  fi < cam_total - off
-            valid_start = max(0, -off)
-            valid_end = min(self._raw_vtotal - 1, cam_total - 1 - off)
-            max_start = max(max_start, valid_start)
-            min_end = min(min_end, valid_end)
-        new_vtotal = max(1, min_end - max_start + 1)
-        if new_vtotal != self.vtotal:
-            self.vtotal = new_vtotal
-            self.slider.setRange(0, max(0, self.vtotal - 1))
-            if self.cur_frame >= self.vtotal:
-                self.cur_frame = self.vtotal - 1
-                self.slider.setValue(self.cur_frame)
+            lo = max(lo, -off)              # need fi + off >= 0
+            hi = min(hi, tot - 1 - off)     # need fi + off <= tot - 1
+        # Skeleton range (no clamp = no duplicate end/start frames).
+        if self.pts3d is not None and self.pts3d.shape[0] > 0:
+            nse = self.pts3d.shape[0] - 1
+            r = self.timeline.ratio
+            so = self._skel_offset
+
+            def skel_ok(fi: int) -> bool:
+                idx = int(round((fi + so) * r))
+                return 0 <= idx <= nse
+            while lo <= hi and not skel_ok(lo):
+                lo += 1
+            while hi >= lo and not skel_ok(hi):
+                hi -= 1
+        if hi < lo:
+            hi = lo
+        self._play_lo, self._play_hi = lo, hi
+        self.slider.blockSignals(True)
+        self.slider.setRange(lo, hi)
+        self.slider.blockSignals(False)
+        self.cur_frame = max(lo, min(hi, self.cur_frame))
+        self.slider.setValue(self.cur_frame)
 
     def _sync_vo_spins(self) -> None:
         """Sync view offset spinboxes to current camera selection."""
@@ -3028,7 +3046,7 @@ class SkeletonCorrector(QMainWindow):
     def _step(self, n: int) -> None:
         if self.vtotal <= 0:
             return
-        self.cur_frame = max(0, min(self.vtotal - 1, self.cur_frame + n))
+        self.cur_frame = max(self._play_lo, min(self._play_hi, self.cur_frame + n))
         self.slider.setValue(self.cur_frame)
 
     def _toggle_play(self, checked: bool) -> None:
@@ -3045,9 +3063,9 @@ class SkeletonCorrector(QMainWindow):
             self.play_btn.setChecked(False)
             return
         nf = self.cur_frame + 1
-        if nf >= self.vtotal:
+        if nf > self._play_hi:
             if self.loop_cb.isChecked():
-                nf = 0
+                nf = self._play_lo
             else:
                 self.play_btn.setChecked(False)
                 return
