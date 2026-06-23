@@ -12,7 +12,6 @@ FPS-aware: video frames map to skeleton (CSV) frames via ratio.
 """
 from __future__ import annotations
 
-import copy
 import json
 import os
 import pickle
@@ -51,16 +50,13 @@ from cvslice.vision.adjustment import (
     compute_ray, extract_R_t, find_nearest_joint, get_camera_depth,
     triangulate_two_rays, unproject_2d_to_3d,
 )
-from cvslice.vision.calib_refine import extrinsic_matrix_from_rt, refine_camera
-from cvslice.vision import (
-    camera_guided, multiview, pose2d, radial_correction, field2d,
-)
+from cvslice.vision import camera_guided, multiview, pose2d
 from cvslice.vision.projection import (
     clear_projection_cache, draw_skel_with_confidence, project_pts,
 )
 from cvslice.vision.propagation import (
     SMPL24_PARENTS, enforce_bone_lengths, interpolate_all_joints,
-    interpolate_offsets_all_joints, interpolate_with_repair,
+    interpolate_with_repair,
     reference_bone_lengths, smooth_post_process,
 )
 
@@ -157,24 +153,10 @@ class SkeletonCorrector(QMainWindow):
         # Keyframes (skeleton/pts3d frame indices) for all-joint interpolation
         self._keyframes: list[int] = []
 
-        # Calibration-refine mode: collect 2D-3D correspondences by dragging a
-        # projected joint to its true pixel, then bundle-adjust the camera.
-        self._calib_mode: bool = False
-        # Each entry: {"cam", "pidx", "joint", "obj": (3,), "img": (2,)}
-        self._calib_corr: list[dict] = []
-        self._calib_drag: dict | None = None  # active refine drag
-        # Pristine deep copy of the scene's calibration, so a bad refine can be
-        # reverted in-memory. Set on scene load. The on-disk timestamped copy
-        # written by a refine is never touched by revert.
-        self._calibs_pristine: dict = {}
-        self._calib_modified: bool = False
         # Lazily-created 2D pose detector for the consistency check.
         self._pose2d = None
         # Faster detector (rtmpose-m) for bulk camera-guided in-between filling.
         self._pose2d_fast = None
-        # Live preview: camera-triangulated skeleton from auto 2D detection.
-        self._auto_preview: bool = False
-        self._auto_cache: dict[int, np.ndarray] = {}  # video frame -> (17,3)
 
         # Undo
         self.undo_stack: list[np.ndarray] = []
@@ -794,11 +776,6 @@ class SkeletonCorrector(QMainWindow):
         self._cur_scene_idx = idx
         self.folder = folder
         self.calibs = calibs
-        # Keep a pristine copy so a bad calibration refine can be reverted.
-        self._calibs_pristine = copy.deepcopy(calibs)
-        self._calib_modified = False
-        if hasattr(self, "calib_revert_btn"):
-            self.calib_revert_btn.setEnabled(False)
         self._actions = actions
         self._progress = self._load_progress(folder)
         self._edited.clear()    # edited skeletons restored per-action from _edited.pkl
@@ -1015,7 +992,6 @@ class SkeletonCorrector(QMainWindow):
         self.edited_joints.clear()
         self._keyframes.clear()
         self._tv2d.clear()
-        self._auto_cache.clear()
         self._selected_joint = None
         self.sel_joint_lbl.setText("选中关节: -")
 
@@ -1316,12 +1292,6 @@ class SkeletonCorrector(QMainWindow):
         ratio_str = f"  skel:{pidx}" if abs(self.pfps - self.vfps) > 0.1 else ""
         self.frame_lbl.setText(
             f"{self.cur_frame} / {self._play_hi}  [{self._play_lo}–{self._play_hi}]{ratio_str}")
-        # Camera-triangulated preview: compute current frame on demand while
-        # paused (too slow to run every playback tick).
-        if (self._auto_preview and self._pose2d is not None
-                and not self.play_btn.isChecked()
-                and self.cur_frame not in self._auto_cache):
-            self._auto_cache[self.cur_frame] = self._auto_triangulate(self.cur_frame)
         self._render_side("T", self.vid_top, self.cam_top_combo.currentText())
         self._render_side("B", self.vid_bot, self.cam_bot_combo.currentText())
 
@@ -1339,17 +1309,6 @@ class SkeletonCorrector(QMainWindow):
             if proj is not None:
                 nan_mask = (self.pts3d_was_nan[pidx]
                             if self.pts3d_was_nan is not None else None)
-                # In calib-refine mode, move each corrected joint's drawn
-                # position to its true/drag pixel so the new point joins the
-                # skeleton (bones connect to it). proj_draw is what we draw and
-                # hit-test against; overlay then rings those points.
-                overrides = (self._calib_overrides(cam, pidx, side)
-                             if self._calib_mode else {})
-                if overrides:
-                    proj = proj.copy()
-                    for j, (ox, oy) in overrides.items():
-                        if j < len(proj):
-                            proj[j] = (ox, oy)
                 # Onion-skin: faint ghosts of the bracketing keyframes' poses,
                 # drawn UNDER the live skeleton so you can place the current one
                 # consistently relative to its neighbours.
@@ -1368,8 +1327,6 @@ class SkeletonCorrector(QMainWindow):
                 draw_skel_with_confidence(frm, proj, nan_mask)
                 hf, wf = frm.shape[:2]
                 for ji in range(len(proj)):
-                    if ji in overrides:
-                        continue   # overlay labels the corrected joints
                     jx, jy = int(proj[ji][0]), int(proj[ji][1])
                     if 0 <= jx < wf and 0 <= jy < hf:
                         cv2.putText(frm, str(ji), (jx + 5, jy - 5),
@@ -1383,12 +1340,6 @@ class SkeletonCorrector(QMainWindow):
                         and self._drag_joint < len(proj)):
                     jx, jy = int(proj[self._drag_joint][0]), int(proj[self._drag_joint][1])
                     cv2.circle(frm, (jx, jy), 11, (0, 255, 0), 2)
-                if self._calib_mode:
-                    self._draw_calib_overlay(frm, proj, cam, side)
-                if self._auto_preview:
-                    apts = self._auto_cache.get(self.cur_frame)
-                    if apts is not None:
-                        self._draw_auto_skel(frm, cam, apts)
                 if side == "T":
                     self._proj_L = proj
                 else:
@@ -1579,14 +1530,6 @@ class SkeletonCorrector(QMainWindow):
         if joint is None:
             return
 
-        # Calibration-refine mode: grab the joint; release records the true 2D.
-        if self._calib_mode:
-            self._calib_drag = {"side": side, "cam": cam, "joint": joint,
-                                "pidx": self._v2p(self.cur_frame),
-                                "x": x, "y": y}
-            self._show_frame()
-            return
-
         if not self.mode_all.isChecked():
             if self._selected_joint != joint:
                 self._selected_joint = joint
@@ -1612,12 +1555,6 @@ class SkeletonCorrector(QMainWindow):
         self._drag_z = z
 
     def _on_move(self, side: str, x: int, y: int) -> None:
-        if self._calib_mode:
-            if self._calib_drag and side == self._calib_drag["side"]:
-                self._calib_drag["x"] = x
-                self._calib_drag["y"] = y
-                self._show_frame()
-            return
         if (self._drag_joint is None or self._drag_cam is None
                 or self._drag_z is None):
             return
@@ -1664,32 +1601,6 @@ class SkeletonCorrector(QMainWindow):
         self._show_frame()
 
     def _on_release(self, side: str, x: int, y: int) -> None:
-        if self._calib_mode:
-            d = self._calib_drag
-            if d and side == d["side"]:
-                cam_d, pidx_d, joint_d = d["cam"], d["pidx"], d["joint"]
-                # Replace any existing correspondence for the same camera /
-                # frame / joint so re-dragging *adjusts* the point instead of
-                # stacking a conflicting duplicate.
-                replaced = any(c["cam"] == cam_d and c["pidx"] == pidx_d
-                               and c["joint"] == joint_d
-                               for c in self._calib_corr)
-                self._calib_corr = [
-                    c for c in self._calib_corr
-                    if not (c["cam"] == cam_d and c["pidx"] == pidx_d
-                            and c["joint"] == joint_d)]
-                self._calib_corr.append({
-                    "cam": cam_d, "pidx": pidx_d, "joint": joint_d,
-                    "obj": self.pts3d[pidx_d, joint_d].copy(),
-                    "img": np.array([x, y], dtype=np.float64)})
-                self._calib_drag = None
-                self._update_calib_count()
-                verb = "已调整" if replaced else "已记录"
-                self.statusBar().showMessage(
-                    f"{verb}标定点: {cam_d} 关节{joint_d} "
-                    f"@帧{self.cur_frame} → ({x},{y})")
-                self._show_frame()
-            return
         if self._drag_joint is None:
             return
         was_drag = self._undo_pushed_for_drag
@@ -1763,220 +1674,6 @@ class SkeletonCorrector(QMainWindow):
         self._show_frame()
         self.statusBar().showMessage("已还原到未调整的骨骼状态(可 Ctrl+Z 撤销)")
 
-    # ------------------------------------------------- calibration refine
-    def _on_calib_mode_changed(self, _state: int) -> None:
-        self._calib_mode = self.calib_mode_cb.isChecked()
-        self._calib_drag = None
-        if self._calib_mode:
-            self.statusBar().showMessage(
-                "标定精修模式: 拖动投影关节到它在画面里的真实位置以采集对应点。")
-        self._show_frame()
-
-    def _update_calib_count(self) -> None:
-        by_cam: dict[str, int] = {}
-        for c in self._calib_corr:
-            by_cam[c["cam"]] = by_cam.get(c["cam"], 0) + 1
-        if not by_cam:
-            self.calib_count_lbl.setText("已采集: 0 点")
-            return
-        parts = ", ".join(f"{cam}:{n}" for cam, n in sorted(by_cam.items()))
-        self.calib_count_lbl.setText(f"已采集 {len(self._calib_corr)} 点 ({parts})")
-
-    def _calib_undo_corr(self) -> None:
-        if self._calib_corr:
-            self._calib_corr.pop()
-            self._update_calib_count()
-            self._show_frame()
-
-    def _calib_clear_corr(self) -> None:
-        self._calib_corr.clear()
-        self._update_calib_count()
-        self._show_frame()
-
-    def _calib_overrides(self, cam: str, pidx: int, side: str) -> dict:
-        """Display-position overrides for corrected joints on this side/frame.
-
-        Maps joint -> (x, y) pixel: joints already corrected at THIS
-        camera+frame use their recorded true pixel; the joint being dragged
-        follows the cursor. _render_side draws the skeleton with these so the
-        new points join the skeleton via bones."""
-        ov = {c["joint"]: (int(c["img"][0]), int(c["img"][1]))
-              for c in self._calib_corr
-              if c["cam"] == cam and c["pidx"] == pidx}
-        d = self._calib_drag
-        if d and d["side"] == side and d["cam"] == cam:
-            ov[d["joint"]] = (int(d["x"]), int(d["y"]))
-        return ov
-
-    def _draw_calib_overlay(self, frm, proj, cam: str, side: str) -> None:
-        """Ring the corrected joints (already moved into *proj* by the caller).
-
-        Per-frame: only points recorded for this camera at the current
-        skeleton frame are highlighted. Hollow ring marks a manually-set
-        point — cyan = recorded, green = being dragged — while the skeleton
-        bones already connect to it."""
-        cur = self._v2p(self.cur_frame)
-        d = self._calib_drag
-        drag_joint = (d["joint"] if d and d["side"] == side
-                      and d["cam"] == cam else None)
-        for c in self._calib_corr:
-            if c["cam"] != cam or c["pidx"] != cur:
-                continue
-            if c["joint"] == drag_joint:
-                continue   # being re-dragged: show the green ring instead
-            ix, iy = int(c["img"][0]), int(c["img"][1])
-            cv2.circle(frm, (ix, iy), 7, (255, 255, 0), 2)    # recorded (cyan)
-            cv2.putText(frm, str(c["joint"]), (ix + 8, iy - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1,
-                        cv2.LINE_AA)
-        if d and d["side"] == side and d["cam"] == cam:
-            dx, dy = int(d["x"]), int(d["y"])
-            cv2.circle(frm, (dx, dy), 8, (0, 255, 0), 2)      # dragging (green)
-            cv2.putText(frm, str(d["joint"]), (dx + 8, dy - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1,
-                        cv2.LINE_AA)
-
-    def _calib_files_for_cam(self, cam: str) -> tuple[str | None, str | None]:
-        """Locate the intrinsic/extrinsic JSON paths for *cam*."""
-        if not self.folder:
-            return None, None
-        cal_dir = os.path.join(self.folder, "calibration")
-        if not os.path.isdir(cal_dir):
-            return None, None
-        intr_p = extr_p = None
-        for fn in os.listdir(cal_dir):
-            fl = fn.lower()
-            if cam not in fl or not fl.endswith(".json"):
-                continue
-            if "intrinsic" in fl:
-                intr_p = os.path.join(cal_dir, fn)
-            elif "extrinsic" in fl:
-                extr_p = os.path.join(cal_dir, fn)
-        return intr_p, extr_p
-
-    def _run_calib_refine(self) -> None:
-        if not self._calib_corr:
-            QMessageBox.information(
-                self, "标定精修", "还没有采集对应点。开启精修模式并拖动关节到真实位置。")
-            return
-        mode = self.calib_scope_combo.currentData() or "full"
-        # Group correspondences by camera, then by frame.
-        cams: dict[str, dict] = {}
-        for c in self._calib_corr:
-            cams.setdefault(c["cam"], {}).setdefault(c["pidx"], ([], []))
-            o, i = cams[c["cam"]][c["pidx"]]
-            o.append(c["obj"]); i.append(c["img"])
-
-        # Refined calibration is written to a fresh timestamped folder inside
-        # the export dir — never the source calibration nor the original copy,
-        # and each run is distinguishable by its name.
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = os.path.join(self.folder or ".", f"calibration_refined_{ts}")
-
-        lines: list[str] = []
-        wrote = 0
-        for cam, by_pidx in cams.items():
-            if cam not in self.calibs:
-                continue
-            intr, extr = self.calibs[cam]
-            Rt = extract_R_t(extr)
-            if Rt is None:
-                lines.append(f"{cam}: 无外参,跳过"); continue
-            R, t = Rt
-            rvec0 = cv2.Rodrigues(R.astype(np.float64))[0]
-            tvec0 = t.astype(np.float64)
-            K0 = np.array(intr["camera_matrix"], dtype=np.float64)
-            dist_raw = intr.get("dist_coeffs") or extr.get("dist_coeffs")
-            dist0 = (np.array(dist_raw, dtype=np.float64).reshape(-1)
-                     if dist_raw is not None else np.zeros(5))
-            cap = self.caps.get(cam)
-            if cap is not None:
-                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
-                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
-            else:
-                w, h = 1280, 720
-            obj_by_frame = [np.array(o) for o, _ in by_pidx.values()]
-            img_by_frame = [np.array(i) for _, i in by_pidx.values()]
-            r = refine_camera(obj_by_frame, img_by_frame, K0, dist0,
-                              rvec0, tvec0, (w, h), mode=mode)
-            if not r["ok"]:
-                lines.append(f"{cam}: {r['reason']}"); continue
-            tag = (f"{cam} [{r['mode_used']}]: RMSE "
-                   f"{r['rmse_before']:.2f}→{r['rmse_after']:.2f}px "
-                   f"({r['n_points']}点/{r['n_frames']}帧)")
-            if not r["improved"]:
-                lines.append(tag + "  未改善,未写入"); continue
-            # Apply refined params to the in-memory dicts so the live view
-            # updates immediately.
-            intr["camera_matrix"] = r["K"].tolist()
-            intr["dist_coeffs"] = [r["dist"].tolist()]
-            extr["best_extrinsic"] = extrinsic_matrix_from_rt(r["rvec"], r["tvec"])
-            extr["dist_coeffs"] = r["dist"].tolist()
-            # Write to the timestamped copy folder, keeping original filenames.
-            intr_p, extr_p = self._calib_files_for_cam(cam)
-            if not os.path.isdir(out_dir):
-                try:
-                    os.makedirs(out_dir, exist_ok=True)
-                except Exception as e:
-                    QMessageBox.warning(self, "标定精修", f"无法创建输出目录: {e}")
-                    return
-            if intr_p:
-                self._write_calib_file(
-                    os.path.join(out_dir, os.path.basename(intr_p)), intr)
-            if extr_p:
-                self._write_calib_file(
-                    os.path.join(out_dir, os.path.basename(extr_p)), extr)
-            wrote += 1
-            lines.append(tag + "  ✓")
-
-        if wrote:
-            self._calib_modified = True
-            self.calib_revert_btn.setEnabled(True)
-        clear_projection_cache()
-        self._auto_cache.clear()   # 3D depends on calibration
-        self._show_frame()
-        self.calib_result_lbl.setText("\n".join(lines))
-        where = (f"\n\n已写入副本目录:\n{os.path.basename(out_dir)}\n"
-                 "(源标定与原 calibration/ 副本均未改动)") if wrote else ""
-        QMessageBox.information(
-            self, "标定精修完成",
-            f"已精修 {wrote} 个相机的标定。{where}\n\n" + "\n".join(lines))
-
-    @staticmethod
-    def _write_calib_file(path: str | None, data: dict) -> None:
-        if not path:
-            return
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=1, ensure_ascii=False)
-        except Exception as e:
-            print(f"Warning: failed to write calibration {path}: {e}")
-
-    def _revert_calibration(self) -> None:
-        """Restore the live calibration to the scene's pristine values.
-
-        Undoes an in-memory refine that turned out worse. Any timestamped
-        ``calibration_refined_*`` folder already written to disk is left as-is.
-        """
-        if not self._calibs_pristine:
-            return
-        ans = QMessageBox.question(
-            self, "恢复标定",
-            "把当前标定恢复到本场景加载时的原始参数?\n"
-            "(已写入磁盘的 calibration_refined_* 副本不受影响)",
-            QMessageBox.Yes | QMessageBox.No)
-        if ans != QMessageBox.Yes:
-            return
-        self.calibs = copy.deepcopy(self._calibs_pristine)
-        self._calib_modified = False
-        self.calib_revert_btn.setEnabled(False)
-        self.calib_result_lbl.setText("已恢复到原始标定参数。")
-        clear_projection_cache()
-        self._auto_cache.clear()
-        self._show_frame()
-        self.statusBar().showMessage("已恢复本场景的原始标定参数。")
-
     # ------------------------------------------------- calibration report
     def _calib_report(self) -> None:
         """Read-only per-camera calibration sanity report (changes nothing).
@@ -1998,8 +1695,6 @@ class SkeletonCorrector(QMainWindow):
         T = self.pts3d.shape[0]
         sample = list(range(0, T, max(1, T // 30)))[:30] or [0]
         corr_by_cam: dict[str, list] = {}
-        for c in self._calib_corr:
-            corr_by_cam.setdefault(c["cam"], []).append(c)
 
         tag = (self._actions[self._cur_action_idx]["tag"]
                if self._cur_action_idx >= 0 else "-")
@@ -2325,682 +2020,6 @@ class SkeletonCorrector(QMainWindow):
         lines.append("\n注:残差里含 2D 检测自身噪声(通常数像素),"
                      "故几像素的下限属正常。")
         self._show_text_dialog("双视角一致性检查", "\n".join(lines))
-
-    def _on_auto_preview_changed(self, _state: int) -> None:
-        on = self.auto_prev_cb.isChecked()
-        if on and self._pose2d is None:
-            if not pose2d.available():
-                QMessageBox.warning(self, "需要 2D 姿态模型", pose2d.install_hint())
-                self.auto_prev_cb.blockSignals(True)
-                self.auto_prev_cb.setChecked(False)
-                self.auto_prev_cb.blockSignals(False)
-                return
-            try:
-                self.statusBar().showMessage("正在加载 2D 姿态模型(首次会下载)...")
-                QApplication.processEvents()
-                self._pose2d = pose2d.Pose2D()
-            except Exception as e:
-                QMessageBox.warning(self, "模型加载失败",
-                                    f"{e}\n\n{pose2d.install_hint()}")
-                self.auto_prev_cb.blockSignals(True)
-                self.auto_prev_cb.setChecked(False)
-                self.auto_prev_cb.blockSignals(False)
-                return
-        self._auto_preview = on
-        if on:
-            self.statusBar().showMessage(
-                "预览: 相机三角化骨架=白/青  vs  SMPL=红/绿/蓝 "
-                "(暂停时按当前帧计算)")
-        self._show_frame()
-
-    def _auto_triangulate(self, fi: int) -> np.ndarray | None:
-        """Triangulate COCO-17 joints at video frame *fi* from the two selected
-        views. Returns (17, 3) with NaN for joints not seen in both views, or
-        None if the camera pair is invalid."""
-        top = self.cam_top_combo.currentText()
-        bot = self.cam_bot_combo.currentText()
-        if (not top or not bot or top == bot or top not in self.calibs
-                or bot not in self.calibs):
-            return None
-        c1, c2 = self._cam_params(top), self._cam_params(bot)
-        if c1 is None or c2 is None:
-            return None
-        d1 = self._pose2d.detect(self._read_cam_frame(top, fi))
-        d2 = self._pose2d.detect(self._read_cam_frame(bot, fi))
-        out = np.full((17, 3), np.nan, dtype=np.float64)
-        if d1 is None or d2 is None:
-            return out
-        xy1, cf1 = d1
-        xy2, cf2 = d2
-        js = [j for j in range(17)
-              if cf1[j] >= pose2d.CONF_THRESH and cf2[j] >= pose2d.CONF_THRESH]
-        if len(js) >= 1:
-            X = multiview.triangulate_pair(
-                xy1[js], xy2[js],
-                c1[0], c1[1], c1[2], c1[3], c2[0], c2[1], c2[2], c2[3])
-            out[js] = X
-        return out
-
-    def _draw_auto_skel(self, frm, cam: str, pts17: np.ndarray) -> None:
-        """Project the triangulated COCO-17 skeleton onto *cam* (white bones,
-        cyan joints). Only finite joints/bones are drawn."""
-        if cam not in self.calibs:
-            return
-        valid = np.isfinite(pts17).all(axis=1)
-        if valid.sum() < 2:
-            return
-        intr, extr = self.calibs[cam]
-        proj = project_pts(np.nan_to_num(pts17), intr, extr, False, False, False)
-        if proj is None:
-            return
-        h, w = frm.shape[:2]
-        for a, b in pose2d.COCO_PAIRS:
-            if valid[a] and valid[b]:
-                xa, ya = int(proj[a][0]), int(proj[a][1])
-                xb, yb = int(proj[b][0]), int(proj[b][1])
-                if 0 <= xa < w and 0 <= ya < h and 0 <= xb < w and 0 <= yb < h:
-                    cv2.line(frm, (xa, ya), (xb, yb), (255, 255, 255), 2)
-        for j in range(17):
-            if valid[j]:
-                x, y = int(proj[j][0]), int(proj[j][1])
-                if 0 <= x < w and 0 <= y < h:
-                    cv2.circle(frm, (x, y), 3, (255, 255, 0), -1)
-
-    # ------------------------------------------ auto calibration refine
-    def _auto_refine_apply(self) -> None:
-        """Auto-refine the bottom-view camera's extrinsics and apply them.
-
-        Circularity-free: the 3D used as the PnP target is triangulated from
-        the OTHER cameras (not the camera being refined, not the SMPL 3D), so
-        it independently constrains this camera's pose. Applies in-memory and
-        writes a timestamped calibration copy (source untouched)."""
-        if not self.calibs or not self.caps or self.vtotal <= 0:
-            QMessageBox.information(self, "自动精修", "请先打开场景并加载动作。")
-            return
-        target = self.cam_bot_combo.currentText()
-        if not target or target not in self.calibs or target not in self.caps:
-            QMessageBox.information(self, "自动精修", "下视图相机不可用。")
-            return
-        refs = [c for c in CAMERA_NAMES
-                if c in self.caps and c in self.calibs and c != target
-                and self._cam_params(c) is not None]
-        if len(refs) < 2:
-            QMessageBox.information(
-                self, "自动精修",
-                f"需要 ≥2 个其它相机作参考(当前可用: {len(refs)} 个)。\n"
-                "请确保场景里有足够多的相机。")
-            return
-        tc = self._cam_params(target)
-        if tc is None:
-            QMessageBox.warning(self, "自动精修", "下视图相机缺少外参。")
-            return
-        if not self._ensure_pose_model():
-            return
-
-        ans = QMessageBox.question(
-            self, "自动精修",
-            f"将以 {len(refs)} 个其它相机为参考,自动精修下视图相机 "
-            f"[{target}] 的外参,并应用 + 保存时间戳副本(源标定不动)。\n\n"
-            f"参考相机: {', '.join(refs)}\n继续?",
-            QMessageBox.Yes | QMessageBox.No)
-        if ans != QMessageBox.Yes:
-            return
-
-        ref_params = {c: self._cam_params(c) for c in refs}
-        T = self.vtotal
-        step = max(1, T // 30)
-        frames = list(range(0, T, step))[:30]
-        thr = pose2d.CONF_THRESH
-
-        obj_by_frame, img_by_frame = [], []
-        n_used = 0
-        prog = self._make_progress("计算中", "自动精修: 检测中...", len(frames))
-        try:
-            for k, fi in enumerate(frames):
-                if prog.wasCanceled():
-                    break
-                prog.setLabelText(f"自动精修: 检测帧 {k + 1}/{len(frames)}")
-                prog.setValue(k)
-                QApplication.processEvents()
-                dt = self._pose2d.detect(self._read_cam_frame(target, fi))
-                if dt is None:
-                    continue
-                xyt, cft = dt
-                ref_det = {}
-                for c in refs:
-                    d = self._pose2d.detect(self._read_cam_frame(c, fi))
-                    if d is not None:
-                        ref_det[c] = d
-                if len(ref_det) < 2:
-                    continue
-                objs, imgs = [], []
-                for j in pose2d.BODY_JOINTS:
-                    if cft[j] < thr:
-                        continue
-                    obs_pts, obs_cams = [], []
-                    for c, (xyc, cfc) in ref_det.items():
-                        if cfc[j] >= thr:
-                            obs_pts.append(xyc[j])
-                            obs_cams.append(ref_params[c])
-                    if len(obs_pts) < 2:
-                        continue
-                    X = multiview.triangulate_multiview(np.array(obs_pts), obs_cams)
-                    objs.append(X)
-                    imgs.append(xyt[j])
-                if objs:
-                    obj_by_frame.append(np.array(objs))
-                    img_by_frame.append(np.array(imgs))
-                    n_used += 1
-        finally:
-            prog.close()
-            self.statusBar().showMessage("自动精修: 求解中 ...")
-
-        n_pts = int(sum(len(o) for o in obj_by_frame))
-        if n_pts < 6:
-            QMessageBox.information(
-                self, "自动精修",
-                f"有效对应点太少({n_pts}),无法求解。\n"
-                f"(用到 {n_used}/{len(frames)} 帧)换更清晰的动作再试。")
-            return
-
-        K, dist, R, t = tc
-        rvec0 = cv2.Rodrigues(R.astype(np.float64))[0]
-        cap = self.caps.get(target)
-        W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
-        H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
-        r = refine_camera(obj_by_frame, img_by_frame, K, dist, rvec0, t,
-                          (W, H), mode="extrinsic")
-        if not r["ok"]:
-            QMessageBox.warning(self, "自动精修", f"求解失败: {r['reason']}")
-            return
-        msg = (f"[{target}] 外参自动精修\n参考相机: {', '.join(refs)}\n"
-               f"{n_pts} 点 / {n_used} 帧\n"
-               f"RMSE {r['rmse_before']:.1f} → {r['rmse_after']:.1f}px")
-        if not r["improved"]:
-            self.calib_result_lbl.setText(msg + "  未改善,未应用")
-            QMessageBox.information(self, "自动精修", msg + "\n\n未改善,未应用。")
-            return
-
-        # Apply to the live calibration and write a timestamped copy.
-        intr, extr = self.calibs[target]
-        extr["best_extrinsic"] = extrinsic_matrix_from_rt(r["rvec"], r["tvec"])
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = os.path.join(self.folder or ".", f"calibration_refined_{ts}")
-        wrote = ""
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-            intr_p, extr_p = self._calib_files_for_cam(target)
-            if intr_p:
-                self._write_calib_file(
-                    os.path.join(out_dir, os.path.basename(intr_p)), intr)
-            if extr_p:
-                self._write_calib_file(
-                    os.path.join(out_dir, os.path.basename(extr_p)), extr)
-            wrote = f"\n已存副本: {os.path.basename(out_dir)}"
-        except Exception as e:
-            wrote = f"\n(写副本失败: {e})"
-
-        self._calib_modified = True
-        self.calib_revert_btn.setEnabled(True)
-        clear_projection_cache()
-        self._auto_cache.clear()
-        self._show_frame()
-        self.calib_result_lbl.setText(msg + "  ✓ 已应用")
-        QMessageBox.information(self, "自动精修完成", msg + "  ✓ 已应用" + wrote +
-                               "\n\n(源标定与原 calibration/ 未改动;不满意可"
-                               "「↺ 恢复原始标定」)")
-
-    def _collect_diag_2d3d(self, title: str):
-        """Collect (predicted, detected) 2D correspondences for the bottom-view
-        camera, used by both the radial and 2D-field fits.
-
-        For pooled walking/running (+fallback) frames: triangulate each body
-        joint from the OTHER cameras (circularity-free), project into the target
-        with its current calibration (pred), and pair with the target's own
-        detection (true). Returns (pred Nx2, true Nx2, intr, extr, cx, cy, W, H)
-        or None (after showing a message)."""
-        if not self.calibs or not self._actions:
-            QMessageBox.information(self, title, "请先打开场景。")
-            return None
-        target = self.cam_bot_combo.currentText()
-        if not target or target not in self.calibs or target not in self.caps:
-            QMessageBox.information(self, title, "下视图相机不可用。")
-            return None
-        cams = [c for c in CAMERA_NAMES if c in self.calibs]
-        refs = [c for c in cams if c != target and self._cam_params(c) is not None]
-        if len(refs) < 2:
-            QMessageBox.information(self, title,
-                                   f"需要 ≥2 个其它相机作参考(当前 {len(refs)} 个)。")
-            return None
-        # Locomotion sweeps the subject into the periphery — the only source of
-        # edge data without a board. Prefer walking/running; if too few, top up
-        # with every other action. Only actions that actually have the TARGET
-        # camera's video are usable, so filter to those first — otherwise the
-        # per-action budget gets split across actions the target never recorded.
-        have = [a for a in self._actions if target in a.get("videos", {})]
-        loco = [a for a in have
-                if any(k in a["tag"].lower() for k in ("walking", "running"))]
-        loco_tags = {a["tag"] for a in loco}
-        others = [a for a in have if a["tag"] not in loco_tags]
-        acts = loco + (others if len(loco) < 3 else [])
-        if not acts:
-            QMessageBox.information(
-                self, title,
-                f"下视图相机 {target} 没有任何带该相机的动作视频,无法采样。")
-            return None
-        if not self._ensure_pose_model():
-            return None
-
-        base = {c: self._cam_params(c) for c in cams}
-        intr, extr = self.calibs[target]
-        K = np.array(intr["camera_matrix"], dtype=np.float64)
-        cx, cy = float(K[0, 2]), float(K[1, 2])
-        W = int(self.caps[target].get(cv2.CAP_PROP_FRAME_WIDTH)) or int(2 * cx)
-        H = int(self.caps[target].get(cv2.CAP_PROP_FRAME_HEIGHT)) or int(2 * cy)
-        thr = pose2d.CONF_THRESH
-        # Sample densely across the pooled clips: more frames = more peripheral
-        # observations on BOTH sides (needed for the asymmetric 2D field).
-        FRAME_BUDGET = 200
-        per_action = max(8, FRAME_BUDGET // max(1, len(acts)))
-        pred_xy, true_xy = [], []
-        prog = self._make_progress("计算中", f"{title}: 多视角检测中...",
-                                   len(acts) * per_action)
-        done = 0
-        try:
-            for a in acts:
-                vids = {c: p for c, p in a.get("videos", {}).items()
-                        if c in base}
-                if target not in vids or len(vids) < 3:
-                    continue
-                caps = {}
-                for c, p in vids.items():
-                    cap = cv2.VideoCapture(p)
-                    if cap.isOpened():
-                        caps[c] = cap
-                if target not in caps or len(caps) < 3:
-                    for cp in caps.values():
-                        cp.release()
-                    continue
-                nfr = min(int(c.get(cv2.CAP_PROP_FRAME_COUNT)) for c in caps.values())
-                fis = list(range(0, max(1, nfr), max(1, nfr // per_action)))[:per_action]
-                for fi in fis:
-                    if prog.wasCanceled():
-                        break
-                    prog.setValue(min(done, prog.maximum()))
-                    done += 1
-                    QApplication.processEvents()
-                    dets = {}
-                    for c, cap in caps.items():
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
-                        ok, frm = cap.read()
-                        if ok and frm is not None:
-                            d = self._pose2d.detect(frm)
-                            if d is not None:
-                                dets[c] = d
-                    if target not in dets or len(dets) < 3:
-                        continue
-                    xyT, cfT = dets[target]
-                    for j in pose2d.BODY_JOINTS:
-                        if cfT[j] < thr:
-                            continue
-                        pts, prm = [], []
-                        for c, (xy, cf) in dets.items():
-                            if c != target and cf[j] >= thr:
-                                pts.append(xy[j])
-                                prm.append(base[c])
-                        if len(pts) < 2:
-                            continue
-                        X = multiview.triangulate_multiview(np.array(pts), prm)
-                        pj = np.asarray(project_pts(X.reshape(1, 3), intr, extr),
-                                        dtype=np.float64).reshape(-1, 2)[0]
-                        pred_xy.append(pj)
-                        true_xy.append(xyT[j])
-                for cp in caps.values():
-                    cp.release()
-        finally:
-            prog.close()
-
-        if len(pred_xy) < 40:
-            QMessageBox.information(
-                self, title, f"有效点太少({len(pred_xy)}),无法拟合。")
-            return None
-        return (np.array(pred_xy), np.array(true_xy), intr, extr, cx, cy, W, H)
-
-    def _fit_radial_correction(self) -> None:
-        """Fit an empirical radial de-warp for the bottom-view camera.
-
-        Measures the radial reprojection residual (3D from the OTHER cameras
-        projected into this one vs its own detected 2D) over walking/running
-        frames, fits delta(r), and applies it at projection time. A stopgap for
-        wide-angle edge distortion that can't be board-recalibrated now."""
-        collected = self._collect_diag_2d3d("边缘校正")
-        if collected is None:
-            return
-        pred, true, intr, extr, cx, cy, _W, _H = collected
-        target = self.cam_bot_combo.currentText()
-        # Measure BEFORE residual, fit, then measure AFTER for the report.
-        before = float(np.median(np.hypot(*(pred - true).T)))
-        model = radial_correction.fit(pred, true, cx, cy)
-        if model is None:
-            QMessageBox.information(self, "边缘校正", "径向趋势不足以拟合(数据太散)。")
-            return
-        corrected = radial_correction.apply(pred, model)
-        after = float(np.median(np.hypot(*(corrected - true).T)))
-        # How far toward the image corner does the fit actually reach? The
-        # correction is flat-clamped beyond the last qualifying bin, so this is
-        # the real edge coverage — the number "feeding it fuller" pushes out.
-        tcap = self.caps.get(target)
-        if tcap is not None:
-            W = float(tcap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 2 * cx
-            H = float(tcap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 2 * cy
-        else:
-            W, H = 2 * cx, 2 * cy
-        corner_r = float(np.hypot(max(cx, W - cx), max(cy, H - cy)))
-        reach = 100.0 * model["r_max"] / corner_r if corner_r > 1 else 0.0
-
-        # Apply (store on the extrinsic dict so project_pts picks it up) + save.
-        extr["radial_correction"] = model
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = os.path.join(self.folder or ".", f"calibration_refined_{ts}")
-        wrote = ""
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-            intr_p, extr_p = self._calib_files_for_cam(target)
-            if extr_p:
-                self._write_calib_file(
-                    os.path.join(out_dir, os.path.basename(extr_p)), extr)
-            if intr_p:
-                self._write_calib_file(
-                    os.path.join(out_dir, os.path.basename(intr_p)), intr)
-            wrote = f"\n已存副本: {os.path.basename(out_dir)}"
-        except Exception as e:
-            wrote = f"\n(写副本失败: {e})"
-
-        self._calib_modified = True
-        self.calib_revert_btn.setEnabled(True)
-        clear_projection_cache()
-        self._auto_cache.clear()
-        self._show_frame()
-        msg = (f"[{target}] 边缘径向校正\n{len(pred)} 点 / {len(model['r']) - 1} 段\n"
-               f"中位残差 {before:.1f} → {after:.1f}px (拟合集上)\n"
-               f"校正覆盖到半径 {model['r_max']:.0f}px ≈ 画面角点的 {reach:.0f}%"
-               f"(此半径外保持不变)")
-        self.calib_result_lbl.setText(
-            f"边缘校正: {before:.1f}→{after:.1f}px / 覆盖{reach:.0f}% ✓")
-        QMessageBox.information(self, "边缘校正完成", msg + wrote +
-                               "\n\n已套用到下视图相机的投影(渲染/预览生效)。"
-                               "\n源标定未改;不满意可「↺ 恢复原始标定」。")
-
-    def _fit_correction_field(self) -> None:
-        """Fit a 2D position-dependent correction FIELD for the bottom-view cam.
-
-        Like the radial fit, but models the residual as a function of image
-        position (not just radius), so it captures asymmetric (decentering)
-        distortion that a symmetric radial curve can't. Needs subject coverage
-        on both sides (e.g. both walking directions). Stored on the extrinsic
-        dict as ``correction_field`` and applied at projection time."""
-        collected = self._collect_diag_2d3d("2D校正场")
-        if collected is None:
-            return
-        pred, true, intr, extr, cx, cy, W, H = collected
-        target = self.cam_bot_combo.currentText()
-        delta = np.hypot(*(pred - true).T)
-        before = float(np.median(delta))
-        # Side-split before/after, so we can report the asymmetry it fixes.
-        left = pred[:, 0] < cx
-        bl = float(np.median(delta[left])) if left.any() else float("nan")
-        br = float(np.median(delta[~left])) if (~left).any() else float("nan")
-
-        model = field2d.fit(pred, true, (W, H))
-        if model is None:
-            QMessageBox.information(self, "2D校正场",
-                                   "数据太稀,无法拟合位置场(需更多/更广的覆盖)。")
-            return
-        corr = field2d.apply(pred, model)
-        da = np.hypot(*(corr - true).T)
-        after = float(np.median(da))
-        al = float(np.median(da[left])) if left.any() else float("nan")
-        ar = float(np.median(da[~left])) if (~left).any() else float("nan")
-
-        extr["correction_field"] = model
-        # Drop any old radial model so the two don't stack.
-        extr.pop("radial_correction", None)
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_dir = os.path.join(self.folder or ".", f"calibration_refined_{ts}")
-        wrote = ""
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-            intr_p, extr_p = self._calib_files_for_cam(target)
-            if extr_p:
-                self._write_calib_file(
-                    os.path.join(out_dir, os.path.basename(extr_p)), extr)
-            if intr_p:
-                self._write_calib_file(
-                    os.path.join(out_dir, os.path.basename(intr_p)), intr)
-            wrote = f"\n已存副本: {os.path.basename(out_dir)}"
-        except Exception as e:
-            wrote = f"\n(写副本失败: {e})"
-
-        self._calib_modified = True
-        self.calib_revert_btn.setEnabled(True)
-        clear_projection_cache()
-        self._auto_cache.clear()
-        self._show_frame()
-        msg = (f"[{target}] 2D 位置校正场\n{len(pred)} 点 / "
-               f"{model['n_cells']} 个有效网格\n"
-               f"中位残差 {before:.1f} → {after:.1f}px (拟合集上)\n"
-               f"左半幅 {bl:.1f}→{al:.1f}px    右半幅 {br:.1f}→{ar:.1f}px")
-        self.calib_result_lbl.setText(
-            f"2D场: 总{before:.1f}→{after:.1f} / 左{bl:.0f}→{al:.0f} "
-            f"右{br:.0f}→{ar:.0f}px ✓")
-        QMessageBox.information(self, "2D校正场完成", msg + wrote +
-                               "\n\n已套用到下视图相机的投影(渲染/预览生效)。"
-                               "\n源标定未改;不满意可「↺ 恢复原始标定」。")
-
-    def _apply_calib_result(self, cam: str, r: dict) -> None:
-        """Write a refine result into the live calibration dicts for *cam*."""
-        intr, extr = self.calibs[cam]
-        if str(r["mode_used"]).startswith("full"):
-            intr["camera_matrix"] = r["K"].tolist()
-            intr["dist_coeffs"] = [r["dist"].tolist()]
-            extr["dist_coeffs"] = r["dist"].tolist()
-        extr["best_extrinsic"] = extrinsic_matrix_from_rt(r["rvec"], r["tvec"])
-
-    def _auto_calibrate_all(self) -> None:
-        """Refine ALL cameras' intrinsics+distortion+extrinsics from frames
-        pooled across walking/running actions.
-
-        Locomotion sweeps the subject across the whole image (incl. edges), so
-        calibrateCamera with the rational distortion model can fit the
-        wide-angle edge distortion. Each camera is refined against 3D
-        triangulated from the OTHER cameras (circularity-free); all
-        triangulation uses a calibration snapshot taken up front so refining
-        one camera doesn't shift the references for the next."""
-        if not self.calibs or not self._actions:
-            QMessageBox.information(self, "全相机标定", "请先打开场景。")
-            return
-        acts = [a for a in self._actions
-                if any(k in a["tag"].lower() for k in ("walking", "running"))]
-        if not acts:
-            QMessageBox.information(
-                self, "全相机标定",
-                "本场景未找到 walking / running 动作(动作名需含这些关键词)。")
-            return
-        cams = [c for c in CAMERA_NAMES if c in self.calibs]
-        if len(cams) < 3:
-            QMessageBox.information(self, "全相机标定",
-                                   "相机太少(<3),无法用其它相机三角化。")
-            return
-        if not self._ensure_pose_model():
-            return
-
-        ans = QMessageBox.question(
-            self, "全相机自动标定",
-            f"将跨 {len(acts)} 个 walking/running 动作取帧,对 {len(cams)} 台相机"
-            "逐台精修(内参+畸变 rational+外参),应用 + 存时间戳副本。\n"
-            "这一步较慢(逐帧多相机检测)。继续?",
-            QMessageBox.Yes | QMessageBox.No)
-        if ans != QMessageBox.Yes:
-            return
-
-        base = {c: self._cam_params(c) for c in cams}
-        base = {c: p for c, p in base.items() if p is not None}
-        sizes: dict[str, tuple] = {}
-
-        # Pool synchronized multi-view observations across locomotion actions.
-        instants: list[dict] = []          # each: cam -> (xy(17,2), conf(17,))
-        per_action = max(4, 40 // max(1, len(acts)))
-        prog = self._make_progress("计算中", "全相机标定: 多视角检测中...",
-                                    len(acts) * per_action)
-        done = 0
-        cancelled = False
-        try:
-            for ai, a in enumerate(acts):
-                if cancelled:
-                    break
-                vids = {c: p for c, p in a.get("videos", {}).items() if c in base}
-                if len(vids) < 3:
-                    continue
-                caps = {}
-                for c, p in vids.items():
-                    cap = cv2.VideoCapture(p)
-                    if cap.isOpened():
-                        caps[c] = cap
-                        sizes.setdefault(c, (
-                            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280,
-                            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720))
-                if len(caps) < 3:
-                    for cp in caps.values():
-                        cp.release()
-                    continue
-                nfr = min(int(c.get(cv2.CAP_PROP_FRAME_COUNT)) for c in caps.values())
-                if nfr <= 0:
-                    for cp in caps.values():
-                        cp.release()
-                    continue
-                step = max(1, nfr // per_action)
-                fis = list(range(0, nfr, step))[:per_action]
-                for n, fi in enumerate(fis):
-                    if prog.wasCanceled():
-                        cancelled = True
-                        break
-                    prog.setLabelText(
-                        f"全相机标定: 动作 {ai + 1}/{len(acts)} 帧 "
-                        f"{n + 1}/{len(fis)}(已收集 {len(instants)} 帧)")
-                    prog.setValue(min(done, prog.maximum()))
-                    done += 1
-                    QApplication.processEvents()
-                    inst = {}
-                    for c, cap in caps.items():
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
-                        ok, frm = cap.read()
-                        if not ok or frm is None:
-                            continue
-                        d = self._pose2d.detect(frm)
-                        if d is not None:
-                            inst[c] = d
-                    if len(inst) >= 3:
-                        instants.append(inst)
-                for cp in caps.values():
-                    cp.release()
-        finally:
-            prog.close()
-            self.statusBar().showMessage("全相机标定: 求解中 ...")
-
-        if len(instants) < 6:
-            QMessageBox.information(
-                self, "全相机标定",
-                f"有效多视角帧太少({len(instants)}),无法标定。")
-            return
-
-        thr = pose2d.CONF_THRESH
-        lines, applied = [], 0
-        solve_prog = self._make_progress("计算中", "全相机标定: 逐台求解中...",
-                                         len(cams))
-        for ci, C in enumerate(cams):
-            solve_prog.setLabelText(f"全相机标定: 求解 {C} ({ci + 1}/{len(cams)})")
-            solve_prog.setValue(ci)
-            QApplication.processEvents()
-            if C not in base:
-                continue
-            obj_by, img_by = [], []
-            for inst in instants:
-                if C not in inst:
-                    continue
-                xyC, cfC = inst[C]
-                objs, imgs = [], []
-                for j in pose2d.BODY_JOINTS:
-                    if cfC[j] < thr:
-                        continue
-                    pts, prm = [], []
-                    for c2, (xy2, cf2) in inst.items():
-                        if c2 != C and cf2[j] >= thr:
-                            pts.append(xy2[j])
-                            prm.append(base[c2])
-                    if len(pts) < 2:
-                        continue
-                    objs.append(multiview.triangulate_multiview(np.array(pts), prm))
-                    imgs.append(xyC[j])
-                if objs:
-                    obj_by.append(np.array(objs))
-                    img_by.append(np.array(imgs))
-            npts = int(sum(len(o) for o in obj_by))
-            if npts < 6:
-                lines.append(f"{C}: 点太少({npts}),跳过")
-                continue
-            K, dist, R, t = base[C]
-            rvec0 = cv2.Rodrigues(R.astype(np.float64))[0]
-            W, H = sizes.get(C, (1280, 720))
-            r = refine_camera(obj_by, img_by, K, dist, rvec0, t, (W, H),
-                              mode="full", rational=True)
-            if not r["ok"]:
-                lines.append(f"{C}: {r['reason']}")
-                continue
-            tag = (f"{C} [{r['mode_used']}]: RMSE "
-                   f"{r['rmse_before']:.1f}→{r['rmse_after']:.1f}px "
-                   f"({npts}点/{r['n_frames']}帧)")
-            if r["improved"]:
-                self._apply_calib_result(C, r)
-                applied += 1
-                lines.append(tag + "  ✓")
-            else:
-                lines.append(tag + "  未改善")
-        solve_prog.close()
-
-        wrote = ""
-        if applied:
-            from datetime import datetime
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_dir = os.path.join(self.folder or ".", f"calibration_refined_{ts}")
-            try:
-                os.makedirs(out_dir, exist_ok=True)
-                for C in cams:
-                    intr_p, extr_p = self._calib_files_for_cam(C)
-                    intr, extr = self.calibs[C]
-                    if intr_p:
-                        self._write_calib_file(
-                            os.path.join(out_dir, os.path.basename(intr_p)), intr)
-                    if extr_p:
-                        self._write_calib_file(
-                            os.path.join(out_dir, os.path.basename(extr_p)), extr)
-                wrote = f"\n已存副本: {os.path.basename(out_dir)}"
-            except Exception as e:
-                wrote = f"\n(写副本失败: {e})"
-            self._calib_modified = True
-            self.calib_revert_btn.setEnabled(True)
-            clear_projection_cache()
-            self._auto_cache.clear()
-            self._show_frame()
-
-        report = (f"全相机自动标定({len(instants)} 个多视角帧)\n"
-                  + "=" * 50 + "\n" + "\n".join(lines)
-                  + f"\n\n已应用 {applied}/{len(cams)} 台相机。{wrote}"
-                  + "\n(源标定与原 calibration/ 未改动;不满意可「↺ 恢复原始标定」)")
-        self.calib_result_lbl.setText(f"全相机标定: 应用 {applied}/{len(cams)} 台")
-        self._show_text_dialog("全相机自动标定", report)
 
     # ------------------------------------------------------ edited joints
     def _refresh_edited_list(self) -> None:
@@ -3403,7 +2422,6 @@ class SkeletonCorrector(QMainWindow):
             f"已对关节 {affected} 在 {win}-帧高斯窗口上做平滑。")
 
     def _on_cam_changed(self, _text: str = "") -> None:
-        self._auto_cache.clear()   # triangulation pair changed
         self._sync_vo_spins()
         self._show_frame()
 
