@@ -55,6 +55,7 @@ _RTMW_X = (f"{_BASE}/rtmw/onnx_sdk/"
 
 # Preset -> rtmlib construction args.
 MODELS = {
+    "rtmpose-lite": {"kind": "body", "mode": "lightweight"},
     "rtmpose-m": {"kind": "body", "mode": "balanced"},
     "rtmpose-x": {"kind": "body", "det": _YOLOX_M, "det_input_size": (640, 640),
                   "pose": _RTMPOSE_X, "pose_input_size": (288, 384)},

@@ -510,6 +510,197 @@ def interpolate_offsets_all_joints(pts_edited: np.ndarray,
     return result
 
 
+def detect_bad_frames(P: np.ndarray, parents=None,
+                      bone_tol: float = 0.08,
+                      accel_frac: float = 0.8) -> np.ndarray:
+    """Flag (frame, joint) cells where the *source* is almost certainly broken.
+
+    Two cheap, camera-free, scale-invariant signals:
+
+    * **Bone length** — human bones are constant, so ANY frame whose bone
+      deviates > ``bone_tol`` (fraction) from that bone's median length is a fit
+      error. Both endpoints of the bad bone are flagged. Never false-positives on
+      real motion (length doesn't change when you move).
+    * **Position pop** — a frame whose per-joint 2nd difference exceeds
+      ``accel_frac`` × (median bone length) AND sits in a SHORT isolated run.
+      Scaling by bone length makes it scale-free; the magnitude floor rejects mm
+      noise; the run-length limit rejects sustained real fast motion (which is
+      smooth, not a brief pop). Catches rigid teleports that keep bone lengths.
+
+    NaN source cells are flagged too (no trustworthy source to keep). Returns a
+    (N, J) bool mask over the given window ``P`` (N frames, J joints, 3).
+    """
+    P = np.asarray(P, float)
+    N, J, _ = P.shape
+    parents = parents if parents is not None else SMPL24_PARENTS
+    bad = np.zeros((N, J), dtype=bool)
+    finite = np.isfinite(P).all(axis=2)              # (N, J)
+    bad |= ~finite                                   # no source -> must replace
+
+    # Bone-length deviation (both endpoints suspect); collect refs for scale.
+    refs = []
+    for j in range(J):
+        p = parents[j] if j < len(parents) else -1
+        if p < 0:
+            continue
+        ok = finite[:, j] & finite[:, p]
+        if ok.sum() < 3:
+            continue
+        L = np.linalg.norm(P[:, j] - P[:, p], axis=1)
+        ref = np.median(L[ok])
+        if ref <= 1e-9:
+            continue
+        refs.append(ref)
+        dev = np.abs(L - ref)
+        mad = np.median(dev[ok]) + 1e-12            # this bone's own noise scale
+        # Clear violation: large in RELATIVE terms AND an outlier vs the bone's
+        # own jitter (so mm-noise tails on a near-constant bone don't flag).
+        flag = ok & (dev / ref > bone_tol) & (dev > 5.0 * mad)
+        bad[flag, j] = True
+        bad[flag, p] = True
+
+    # Per-joint temporal anomalies (need a bone scale to be unit-free).
+    if refs:
+        Bmed = float(np.median(refs))
+        floor_pop = accel_frac * Bmed          # large rigid teleport
+        floor_burst = 0.005 * Bmed             # small wobble (~0.5% of a bone)
+        idx = np.arange(N)
+        for j in range(J):
+            if finite[:, j].sum() < 5:
+                continue
+            x = P[:, j].copy()
+            for d in range(3):                       # bridge small NaN for diff
+                m = np.isfinite(x[:, d])
+                if m.sum() >= 2:
+                    x[:, d] = np.interp(idx, idx[m], x[m, d])
+            # (a) Large pop: 2nd-difference floor, short isolated run.
+            acc = np.linalg.norm(np.diff(x, n=2, axis=0), axis=1)   # (N-2,)
+            cand = np.zeros(N, dtype=bool)
+            cand[1:-1] = acc > floor_pop
+            bad[_short_runs_only(cand, max_run=3), j] = True
+            # (b) Small short burst (e.g. foot/ankle wobble that survives both
+            # bone-length and pop tests): deviation from a robust median
+            # baseline, above a small bone-scaled floor AND an outlier vs the
+            # joint's own jitter, kept only in runs <= 5 (sustained = real fast
+            # motion, which deviates from the lagging median for many frames).
+            if N >= 7:
+                base = median_despike(x, 11)
+                dev = np.linalg.norm(x - base, axis=1)
+                mad = float(np.median(dev)) + 1e-12
+                cb = dev > max(floor_burst, 6.0 * mad)
+                bad[_short_runs_only(cb, max_run=5), j] = True
+    return bad
+
+
+def _short_runs_only(mask: np.ndarray, max_run: int) -> np.ndarray:
+    """Zero out runs of consecutive True longer than ``max_run`` (keep only the
+    brief, glitch-like spikes; drop sustained stretches = real fast motion)."""
+    out = mask.copy()
+    N = len(mask)
+    i = 0
+    while i < N:
+        if mask[i]:
+            j = i
+            while j < N and mask[j]:
+                j += 1
+            if j - i > max_run:
+                out[i:j] = False
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def interpolate_with_repair(pts_edited: np.ndarray, pts_orig: np.ndarray,
+                            frame_a: int, frame_b: int, method: str = "pchip",
+                            keyframes: list[int] | None = None,
+                            dragged_joints=None, parents=None,
+                            smooth: float = 0.0, auto_soft: bool = True,
+                            bone_tol: float = 0.08, accel_frac: float = 0.8):
+    """Keyframe interpolation that also auto-repairs broken source frames.
+
+    The plain offset interpolation only *replaces* the joints the user dragged;
+    a joint that is broken mid-gap but wasn't dragged (it looked fine at the
+    keyframes) keeps its broken source -> "still wrong after interpolate". Here
+    we additionally detect broken (frame, joint) cells in the source
+    (:func:`detect_bad_frames`) and drive those purely from the keyframes too,
+    while every good cell keeps its real source motion (no flattening).
+
+    Strategy: *inpaint* the broken source cells locally — interpolate each bad
+    run from the nearest GOOD source frames of the same joint. This rebuilds the
+    real motion through the glitch (local anchors, not distant keyframes) and is
+    self-protecting: a false-positive on smooth fast motion is replaced by an
+    interpolation of its close neighbours, i.e. ~itself. Then run the normal
+    offset interpolation on the cleaned source (dragged / un-inpaintable joints
+    still driven purely by the keyframes).
+
+    Annotation jitter: the source is temporally smooth, so the visible wobble
+    comes from forcing the curve EXACTLY through slightly-inconsistent
+    hand-placed keyframes (2D dragging barely constrains depth). When
+    ``auto_soft`` is on, the soft-keyframe smoothing sigma is auto-scaled to the
+    median keyframe spacing (~0.8×), which averages out that placement noise and
+    removes the wobble at whatever density the user annotated — landing the curve
+    *near* the (noisy) keyframes rather than snapping onto each one.
+
+    Returns (result (N, J, 3) for [frame_a..frame_b], repaired_joints set,
+    n_repaired_cells, sigma_used) — counts reflect cells the repair actually
+    moved, not raw detections.
+    """
+    T, J, _ = pts_edited.shape
+    fa = max(0, min(frame_a, frame_b))
+    fb = min(T - 1, max(frame_a, frame_b))
+    parents = parents if parents is not None else SMPL24_PARENTS
+    dragged = {int(j) for j in (dragged_joints or [])}
+
+    # Soft-keyframe sigma auto-scaled to keyframe spacing (averages annotation
+    # placement noise). User ``smooth`` acts as a floor / manual boost.
+    kfs_in = sorted(int(k) for k in (keyframes or []) if fa <= k <= fb)
+    auto_sigma = 0.0
+    if auto_soft and len(kfs_in) >= 3:
+        sp = float(np.median(np.diff(kfs_in)))
+        auto_sigma = min(0.8 * sp, 10.0)
+    eff_smooth = max(float(smooth), auto_sigma)
+
+    detected = detect_bad_frames(pts_orig[fa:fb + 1], parents, bone_tol,
+                                 accel_frac)
+
+    # Inpaint a repaired copy of the source within [fa, fb]; count only cells the
+    # repair actually MOVES (flagging an already-fine cell inpaints to ~itself,
+    # so it shouldn't show up as a "fix").
+    src = pts_orig.copy()
+    win = src[fa:fb + 1]
+    n = fb - fa + 1
+    idx = np.arange(n)
+    bl = [np.median(np.linalg.norm(win[:, j] - win[:, parents[j]], axis=1))
+          for j in range(J) if 0 <= parents[j] < J]
+    thr = 0.006 * (float(np.median(bl)) if bl else 1.0)   # count visible moves (~0.6% bone)
+    escalate = set()                                 # too broken to inpaint
+    repaired_joints = set()
+    n_repaired = 0
+    for j in range(J):
+        badj = detected[:, j]
+        if not badj.any():
+            continue
+        good = (~badj) & np.isfinite(win[:, j]).all(axis=1)
+        if good.sum() < 2:
+            escalate.add(j)                          # no anchors -> keyframes
+            continue
+        before = win[badj, j].copy()
+        for d in range(3):
+            win[badj, j, d] = np.interp(idx[badj], idx[good], win[good, j, d])
+        moved = int((np.linalg.norm(win[badj, j] - before, axis=1) > thr).sum())
+        if moved:
+            n_repaired += moved
+            repaired_joints.add(j)
+    src[fa:fb + 1] = win
+
+    replace = {j for j in (dragged | escalate) if j < J}
+    res = interpolate_offsets_all_joints(
+        pts_edited, src, fa, fb, method,
+        keyframes=keyframes, replace_joints=replace, smooth=eff_smooth)
+    return res, repaired_joints, n_repaired, eff_smooth
+
+
 def apply_bulk_offset_all_joints(pts3d: np.ndarray,
                                  frame_start: int, frame_end: int,
                                  deltas: np.ndarray,

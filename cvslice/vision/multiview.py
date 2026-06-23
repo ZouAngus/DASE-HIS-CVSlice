@@ -85,6 +85,51 @@ def triangulate_multiview(pts2d, cams) -> np.ndarray:
     return X[:3] / X[3]
 
 
+def _back_project_ray(uv, K, dist, R, t):
+    """Camera centre C (world) and unit ray direction (world) for a pixel.
+
+    Distortion is removed first so the ray is the true optical ray. World<-cam
+    uses X_cam = R X_world + t  =>  C = -R^T t,  dir_world = R^T dir_cam.
+    """
+    K = np.asarray(K, float).reshape(3, 3)
+    R = np.asarray(R, float).reshape(3, 3)
+    t = np.asarray(t, float).reshape(3)
+    dist = np.asarray(dist, float).reshape(-1)
+    und = cv2.undistortPoints(np.asarray(uv, float).reshape(1, 1, 2), K, dist)
+    xn, yn = und.reshape(2)
+    d_cam = np.array([xn, yn, 1.0])
+    d_world = R.T @ d_cam
+    d_world /= (np.linalg.norm(d_world) + 1e-12)
+    C = -R.T @ t
+    return C, d_world
+
+
+def triangulate_regularized(pts2d, cams, x0, lam: float = 0.5) -> np.ndarray:
+    """Triangulate ONE 3D point, regularised toward a prior ``x0``.
+
+    Plain triangulation minimises the squared point-to-ray distance over the
+    views. When the rays are near-parallel (this rig's depth direction) that
+    least-squares problem is ill-conditioned and 2D detection noise blows the
+    depth up — the in-view reprojection still looks fine, but the 3D (hence the
+    pose seen from *other* angles) is wrong. Adding ``lam * ||X - x0||^2`` pins
+    the solution to ``x0`` ONLY along directions the cameras don't constrain
+    (the projector terms are rank-deficient exactly there), while the cameras
+    still win in the well-observed in-image directions. So lateral error is
+    corrected and bad depth is never injected.
+
+        (Σ_v (I - d_v d_v^T) + lam I) X = Σ_v (I - d_v d_v^T) o_v + lam x0
+    """
+    A = lam * np.eye(3)
+    b = lam * np.asarray(x0, float).reshape(3)
+    for uv, cam in zip(pts2d, cams):
+        K, dist, R, t = cam
+        o, d = _back_project_ray(uv, K, dist, R, t)
+        M = np.eye(3) - np.outer(d, d)        # projector onto plane ⟂ ray
+        A += M
+        b += M @ o
+    return np.linalg.solve(A, b)
+
+
 def reprojection_residuals(X: np.ndarray, pts: np.ndarray,
                            K, dist, R, t) -> np.ndarray:
     """Per-point reprojection error (pixels) of 3D points X into one view."""
