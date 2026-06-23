@@ -920,9 +920,19 @@ class SkeletonCorrector(QMainWindow):
         """
         if idx < 0 or idx >= len(self._actions):
             return
-        # Snapshot the outgoing action's offsets/edits so they aren't lost.
+        # Snapshot the outgoing action's offsets/edits so they aren't lost; if it
+        # was actually EDITED (interp/smooth/drag changed it from the source),
+        # auto-save it now. A view-only visit leaves it == source -> not cached
+        # -> nothing written.
         if self.pts3d is not None and self._cur_action_idx >= 0:
+            out_tag = self._actions[self._cur_action_idx]["tag"]
             self._capture_current_progress()
+            if out_tag in self._edited:                 # edited, not view-only
+                wrote = self._write_edit_pkl(out_tag)
+                self._write_progress_json()
+                if wrote:
+                    self.statusBar().showMessage(
+                        f"已自动保存上一动作的编辑: {out_tag}")
         act = self._actions[idx]
         self._cur_action_idx = idx
 
@@ -1219,26 +1229,40 @@ class SkeletonCorrector(QMainWindow):
         base = os.path.splitext(os.path.basename(pkl))[0]
         return os.path.join(os.path.dirname(pkl), f"{base}_edited.pkl")
 
+    def _write_edit_pkl(self, tag) -> bool:
+        """Write ONE cached edited action to its ``<base>_edited.pkl`` (same file
+        the manual 保存 produces). Returns True if written."""
+        info = self._edited.get(tag)
+        if not info:
+            return False
+        act = next((a for a in self._actions if a["tag"] == tag), None)
+        ep = self._edited_pkl_path(act, info.get("source")) if act else None
+        if not ep:
+            return False
+        try:
+            arr = np.ascontiguousarray(info["pts"], dtype=np.float32)
+            with open(ep, "wb") as f:
+                pickle.dump(arr, f, protocol=2)
+            return True
+        except Exception:
+            return False
+
+    def _write_progress_json(self) -> None:
+        """Dump the offsets/keyframes index to corrector_progress.json (silent)."""
+        p = self._progress_path()
+        if not p:
+            return
+        try:
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(self._progress, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
     def _persist_edits_to_pkl(self) -> int:
-        """Write each session-edited mosh action to its ``<base>_edited.pkl``
-        (same file the manual 保存 produces), so reopening restores it. Returns
-        the number written."""
+        """Write every session-edited mosh action to its ``<base>_edited.pkl``,
+        so reopening restores them. Returns the number written."""
         self._capture_current_progress()
-        by_tag = {a["tag"]: a for a in self._actions}
-        n = 0
-        for tag, info in self._edited.items():
-            act = by_tag.get(tag)
-            ep = self._edited_pkl_path(act, info.get("source")) if act else None
-            if not ep:
-                continue
-            try:
-                arr = np.ascontiguousarray(info["pts"], dtype=np.float32)
-                with open(ep, "wb") as f:
-                    pickle.dump(arr, f, protocol=2)
-                n += 1
-            except Exception:
-                pass
-        return n
+        return sum(1 for tag in list(self._edited) if self._write_edit_pkl(tag))
 
     def _capture_current_progress(self) -> None:
         """Snapshot the current action's offsets/edits/keyframes into
@@ -1276,13 +1300,7 @@ class SkeletonCorrector(QMainWindow):
                 QMessageBox.information(self, "进度", "请先打开一个导出文件夹。")
             return
         n_edit = self._persist_edits_to_pkl()
-        try:
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(self._progress, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            if not silent:
-                QMessageBox.warning(self, "进度", f"保存失败: {e}")
-            return
+        self._write_progress_json()
         if not silent:
             QMessageBox.information(
                 self, "进度",
