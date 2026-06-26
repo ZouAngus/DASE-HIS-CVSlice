@@ -1057,6 +1057,9 @@ class SkeletonCorrector(QMainWindow):
                   if isinstance(j, int) and 0 <= int(j) < pts3d.shape[1]}
             if js:
                 self._kf_joints.setdefault(f, set()).update(js)
+        # Old-format progress (keyframes + edited joints, no pins): synthesise
+        # pins so it uses the same per-joint interpolation as new data.
+        self._retrofit_pins()
 
         self.skel_off_spin.blockSignals(True)
         self.skel_off_spin.setValue(self._skel_offset)
@@ -2432,15 +2435,15 @@ class SkeletonCorrector(QMainWindow):
             self.slider.setValue(self.cur_frame)
 
     def _build_joint_keyframes(self) -> dict:
-        """Map joint -> sorted authored frames ("pins") for per-joint interp.
+        """Map joint -> sorted authored frames ("pins"). Each joint is filled
+        ONLY between its own pins, so authoring one joint never reshapes another
+        -> corrections accumulate. Joints the user never touched are absent ->
+        left untouched.
 
-        Pins recorded at drag/copy time win and stay DECOUPLED (a joint with
-        >=2 precise pins is filled only between its own pins, so authoring one
-        joint never reshapes another -> corrections accumulate). Edited joints
-        that don't yet have >=2 precise pins fall back to the global keyframe
-        list (old all-edited-joint behaviour), so legacy/old-session data and
-        single-pin joints still interpolate. Joints the user never touched are
-        absent -> left untouched."""
+        This is the single interpolation model: there is no global-keyframe
+        fallback. Old-format progress (global keyframes + an edited-joints list
+        but no pins) is retrofitted with pins on load (:meth:`_retrofit_pins`),
+        so old data flows through the exact same per-joint path."""
         if self.pts3d is None:
             return {}
         T, J = self.pts3d.shape[0], self.pts3d.shape[1]
@@ -2451,13 +2454,25 @@ class SkeletonCorrector(QMainWindow):
             for j in joints:
                 if 0 <= int(j) < J:
                     jk.setdefault(int(j), set()).add(int(f))
-        glob = [k for k in sorted(self._keyframes) if 0 <= k < T]
-        if len(glob) >= 2:
-            for j in self.edited_joints:
-                j = int(j)
-                if 0 <= j < J and len(jk.get(j, ())) < 2:
-                    jk.setdefault(j, set()).update(glob)
         return {j: sorted(fs) for j, fs in jk.items() if len(fs) >= 2}
+
+    def _retrofit_pins(self) -> int:
+        """Give old-format progress per-joint pins so it uses the same per-joint
+        interpolation as new data. Old progress had a global keyframe list + an
+        edited-joints list but no pins; here each edited joint is pinned at every
+        keyframe. No-op once any pin exists (new data already records pins on
+        drag). Returns the number of (frame, joint) pins added; they persist on
+        the next save, auto-migrating the action."""
+        if self._kf_joints or self.pts3d is None:
+            return 0
+        T, J = self.pts3d.shape[0], self.pts3d.shape[1]
+        kfs = [k for k in self._keyframes if 0 <= k < T]
+        joints = [j for j in self.edited_joints if 0 <= j < J]
+        if len(kfs) < 2 or not joints:
+            return 0
+        for k in kfs:
+            self._kf_joints.setdefault(k, set()).update(joints)
+        return len(kfs) * len(joints)
 
     def _interp_keyframes(self) -> None:
         if self.pts3d is None:
