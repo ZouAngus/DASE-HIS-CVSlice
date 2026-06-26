@@ -2879,9 +2879,13 @@ class SkeletonCorrector(QMainWindow):
 
     @staticmethod
     def _cycle_combo(combo, delta: int) -> None:
-        idx = combo.currentIndex() + delta
-        if 0 <= idx < combo.count():
-            combo.setCurrentIndex(idx)
+        # Wrap around (cyclic) so Q/E and Z/C reach EVERY camera in either
+        # direction — no dead-ends at the ends of the list. The bottom cameras
+        # sit late in the list, so a non-wrapping prev/next could never reach
+        # them from the default (top) selection.
+        n = combo.count()
+        if n > 0:
+            combo.setCurrentIndex((combo.currentIndex() + delta) % n)
 
     def _cycle_action(self, delta: int) -> None:
         """Move the action-list selection by *delta* (W/S keys)."""
