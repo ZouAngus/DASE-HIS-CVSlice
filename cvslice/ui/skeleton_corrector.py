@@ -131,6 +131,9 @@ class SkeletonCorrector(QMainWindow):
         # In-memory edited skeletons per action tag, so edits survive action
         # switches and can be batch-saved. tag -> {"pts": ndarray, "source": key}
         self._edited: dict[str, dict] = {}
+        # Tags finalized by 裁切对齐 (their _edited.pkl is trimmed); the auto-save
+        # must NOT overwrite those with the full in-memory pose. Cleared on edit.
+        self._exported: set[str] = set()
 
         # Per-side projection cache for hit testing
         self._proj_L: np.ndarray | None = None
@@ -547,6 +550,15 @@ class SkeletonCorrector(QMainWindow):
         vo_g.setToolTip("骨骼时间: 整体平移骨骼帧 (±10) 对齐视频。\n"
                         "上/下视图: 各相机微调 (±10)。\n"
                         "超出范围的帧会被裁掉。")
+        bake_btn = QPushButton("✂️ 裁切对齐 (pkl + 所有视频, 原地)")
+        bake_btn.setStyleSheet("font-weight:bold;")
+        bake_btn.setToolTip(
+            "最终烘焙: 按『最晚开头/最早结尾』的交集窗口(跨所有视角+骨架),把 pkl "
+            "裁切写入 _edited.pkl,并按各视角自己的 offset 原地裁切所有源 MP4 "
+            "(首次自动 .bak 备份),使 pkl 与每个视角逐帧同步。\n"
+            "⚠ 会覆盖源视频(.bak 可恢复),是最终一次性操作。")
+        bake_btn.clicked.connect(self._trim_align_save)
+        vof.addRow(bake_btn)
         lp.addWidget(vo_g)
 
         # Calibration toolbox removed: diagonal was recalibrated at the source
@@ -1103,25 +1115,14 @@ class SkeletonCorrector(QMainWindow):
             tag = (self._actions[self._cur_action_idx]["tag"]
                    if self._cur_action_idx >= 0 else "edited")
 
-            # Trim to the offset-valid window: with a time offset some skeleton
-            # frames fall outside the video range, so the exported (aligned) pkl
-            # drops them. The working _edited.pkl stays full-length for editing.
-            lo, hi = self._aligned_skel_range()
-            n_full = self.pts3d.shape[0]
-            trimmed = lo > 0 or hi < n_full - 1
-
             if src.output_ext == "pkl":
-                pts_to_save = self.pts3d[lo:hi + 1]
                 default = src.default_output_path(self.folder, tag)
-                if trimmed and default.endswith("_edited.pkl"):
-                    default = default[:-len("_edited.pkl")] + "_aligned.pkl"
                 target, _ = QFileDialog.getSaveFileName(
                     self, "保存编辑后的骨架 (PKL)", default, "Pickle Files (*.pkl)")
                 if not target:
                     return
             else:
-                # CSV: overwrite source in place (back up once); not trimmed.
-                pts_to_save = self.pts3d
+                # CSV: overwrite source in place (back up once).
                 target = self.csv_path or src.default_output_path(self.folder, tag)
                 if not self.csv_path:
                     target, _ = QFileDialog.getSaveFileName(
@@ -1138,22 +1139,173 @@ class SkeletonCorrector(QMainWindow):
                             pass
 
             try:
-                src.save(pts_to_save, target)
+                src.save(self.pts3d, target)
             except Exception as e:
                 QMessageBox.warning(self, "保存失败", str(e))
                 return
-            shape = tuple(np.asarray(pts_to_save).shape)
-            crop = ""
-            if trimmed and src.output_ext == "pkl":
-                crop = (f"\n已按时间 offset 裁切: 骨架 {n_full}→{hi - lo + 1} 帧 "
-                        f"(对齐到视频窗口 [{self._play_lo}–{self._play_hi}])。\n"
-                        f"把视频也裁到该窗口即逐帧对齐;完整未裁版仍在 _edited.pkl。")
+            shape = tuple(np.asarray(self.pts3d).shape)
             QMessageBox.information(
-                self, "已保存",
-                f"已写入: {os.path.basename(target)}  shape={shape}{crop}")
+                self, "已保存", f"已写入: {os.path.basename(target)}  shape={shape}")
         finally:
             if was_playing:
                 self.play_btn.setChecked(True)
+
+    @staticmethod
+    def _trim_video(src: str, out: str, start: int, end: int, fps: float) -> int:
+        """Write frames [start..end] of *src* to *out* (mp4v). Returns # frames."""
+        cap = cv2.VideoCapture(src)
+        if not cap.isOpened():
+            return 0
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        tot = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        vw = cv2.VideoWriter(out, fourcc, fps if fps > 0 else 30.0, (w, h))
+        s, e = max(0, start), min(end, tot - 1)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, s)
+        cur, n = s, 0
+        while cur <= e:
+            ret, frm = cap.read()
+            if not ret:
+                break
+            vw.write(frm)
+            cur += 1
+            n += 1
+        vw.release()
+        cap.release()
+        return n
+
+    def _trim_align_save(self) -> None:
+        """Final bake: trim the pkl to the offset-aligned window and trim every
+        view's source MP4 in place (one-time .bak) to its own offset-shifted
+        window, so the pkl and all views become frame-synced. One-way."""
+        if self.pts3d is None or self._source is None or self._cur_action_idx < 0:
+            return
+        act = self._actions[self._cur_action_idx]
+        tag = act["tag"]
+        lo, hi = self._play_lo, self._play_hi              # video window
+        slo, shi = self._aligned_skel_range()              # skeleton window
+        n_full, vtot = self.pts3d.shape[0], self._raw_vtotal
+        ep = self._edited_pkl_path(act, self._skel_source)
+        if ep is None:
+            QMessageBox.warning(self, "裁切对齐",
+                                "当前源不是 mosh/SMPL,无法写 _edited.pkl。")
+            return
+        vids = {cam: self.videos.get(cam) for cam in list(self.caps.keys())
+                if self.videos.get(cam) and os.path.exists(self.videos[cam])}
+        if hi < lo or not vids:
+            QMessageBox.information(self, "裁切对齐", "没有可裁切的窗口/视频。")
+            return
+        no_trim = (lo == 0 and hi == vtot - 1 and slo == 0 and shi == n_full - 1)
+        head = ("当前无 offset 越界(窗口=全长),裁切相当于原样复制。\n\n"
+                if no_trim else "")
+        if QMessageBox.question(
+                self, "裁切对齐 (最终烘焙)",
+                f"{head}将按交集窗口 视频[{lo}..{hi}] (最晚开头/最早结尾):\n"
+                f"• pkl 裁到 {shi - slo + 1} 帧 → {os.path.basename(ep)}\n"
+                f"• 原地裁切 {len(vids)} 个视角源 MP4(各按自己 offset;首次自动 "
+                f".bak 备份)\n\n"
+                f"⚠ 覆盖源视频、最终一次性操作(.bak 可恢复)。继续?",
+                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+
+        was_playing = self.play_btn.isChecked()
+        if was_playing:
+            self.play_btn.setChecked(False)
+
+        # 1) trim pkl -> _edited.pkl
+        trimmed = self.pts3d[slo:shi + 1].copy()
+        try:
+            with open(ep, "wb") as f:
+                pickle.dump(np.ascontiguousarray(trimmed, dtype=np.float32),
+                            f, protocol=2)
+        except Exception as e:
+            QMessageBox.warning(self, "裁切对齐", f"写 pkl 失败: {e}")
+            return
+
+        # 2) release caps, trim each view in place (read from .bak = original)
+        for c in self.caps.values():
+            try:
+                c.release()
+            except Exception:
+                pass
+        import shutil
+        prog = self._make_progress("裁切对齐", "裁切视频...", len(vids))
+        done = []
+        try:
+            for i, (cam, path) in enumerate(vids.items()):
+                if prog.wasCanceled():
+                    break
+                prog.setLabelText(f"裁切 {cam} ({i + 1}/{len(vids)})")
+                prog.setValue(i)
+                QApplication.processEvents()
+                off = self._view_offsets.get(cam, 0)
+                bak = path + ".bak"
+                if not os.path.exists(bak):
+                    try:
+                        shutil.copy2(path, bak)
+                    except Exception:
+                        pass
+                read_from = bak if os.path.exists(bak) else path
+                tmp = path + ".tmp.mp4"
+                n = self._trim_video(read_from, tmp, lo + off, hi + off, self.vfps)
+                if n > 0 and os.path.exists(tmp):
+                    try:
+                        os.replace(tmp, path)
+                        done.append(cam)
+                    except Exception:
+                        if os.path.exists(tmp):
+                            os.remove(tmp)
+                elif os.path.exists(tmp):
+                    os.remove(tmp)
+        finally:
+            prog.close()
+
+        # 3) adopt the trimmed state, reopen caps, reset offsets to 0
+        self.pts3d = trimmed
+        self.pts3d_orig = trimmed.copy()
+        self.pts3d_was_nan = None
+        self._exported.add(tag)
+        self._edited.pop(tag, None)
+        self.edited_joints.clear()
+        self._keyframes.clear()
+        self._tv2d.clear()
+        self.undo_stack.clear()
+        self._frame_cache.clear()
+        self._cap_totals.clear()
+        caps, min_vtot = {}, 10 ** 9
+        for cn, p in act["videos"].items():
+            cap = cv2.VideoCapture(p)
+            if cap.isOpened():
+                caps[cn] = cap
+                t = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                self._cap_totals[cn] = max(0, t)
+                if t > 0:
+                    min_vtot = min(min_vtot, t)
+        self.caps = caps
+        self.vtotal = min_vtot if min_vtot < 10 ** 9 else trimmed.shape[0]
+        self._raw_vtotal = self.vtotal
+        self._view_offsets.clear()
+        self._skel_offset = 0
+        self.skel_off_spin.blockSignals(True)
+        self.skel_off_spin.setValue(0)
+        self.skel_off_spin.blockSignals(False)
+        self.timeline = Timeline(trimmed.shape[0], self.vtotal, self.vfps)
+        self.cur_frame = 0
+        self._recalc_play_range()
+        self._sync_vo_spins()
+        self._refresh_edited_list()
+        self._refresh_kf_list()
+        self._update_undo_lbl()
+        self._show_frame()
+        if was_playing:
+            self.play_btn.setChecked(True)
+        QMessageBox.information(
+            self, "裁切对齐完成",
+            f"pkl: {n_full}→{trimmed.shape[0]} 帧 → {os.path.basename(ep)}\n"
+            f"视频: 覆盖 {len(done)}/{len(vids)} 个视角 (源已 .bak 备份)\n"
+            f"窗口 视频[{lo}..{hi}];offset 已归零,pkl 与各视角逐帧对齐。\n"
+            f"重做: 用各 .bak 恢复并删除 {os.path.basename(ep)}。")
 
     def _save_all(self) -> None:
         """Save every edited action at once to its default output path.
@@ -1238,6 +1390,8 @@ class SkeletonCorrector(QMainWindow):
     def _write_edit_pkl(self, tag) -> bool:
         """Write ONE cached edited action to its ``<base>_edited.pkl`` (same file
         the manual 保存 produces). Returns True if written."""
+        if tag in self._exported:
+            return False        # finalized (trimmed) -> don't clobber with full
         info = self._edited.get(tag)
         if not info:
             return False
@@ -1653,6 +1807,10 @@ class SkeletonCorrector(QMainWindow):
     def _push_undo(self) -> None:
         if self.pts3d is None:
             return
+        # Any edit un-finalizes the current action (its trimmed _edited.pkl is
+        # now stale; let auto-save track the full pose again).
+        if self._cur_action_idx >= 0:
+            self._exported.discard(self._actions[self._cur_action_idx]["tag"])
         self.undo_stack.append(self.pts3d.copy())
         if len(self.undo_stack) > self.UNDO_MAX:
             self.undo_stack.pop(0)
