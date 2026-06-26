@@ -969,16 +969,24 @@ class SkeletonCorrector(QMainWindow):
         self.csv_path = act["csv"]
         self.pts3d = pts3d.astype(np.float64).copy()
         self.pts3d_orig = self.pts3d.copy()
-        # Restore a previously-SAVED edited skeleton from disk: the manual 保存
-        # (and auto-save) write <base>_edited.pkl next to the source pkl. This is
-        # why reopening shows your edits instead of the pristine source.
+        self.pts3d_was_nan = was_nan
+        # Restore a previously-SAVED edited skeleton from disk: manual 保存 /
+        # auto-save / 裁切对齐 write <base>_edited.pkl next to the source pkl.
+        # Same length => an in-place edit (source stays the reset baseline).
+        # SHORTER => it was baked (裁切对齐) to the synced window: the videos are
+        # trimmed to match, so adopt it as BOTH the working skeleton and the
+        # reset baseline and drop the (full-length) source, keeping pkl/videos
+        # frame-aligned on reopen.
         ep = self._edited_pkl_path(act, used)
         if ep and os.path.exists(ep):
             try:
                 ep_pts, _ = load_mosh_pkl(ep, getattr(self._source, "which", "sim"))
                 ep_pts = np.asarray(ep_pts, dtype=np.float64)
-                if ep_pts.shape == self.pts3d.shape:
+                if ep_pts.ndim == 3 and ep_pts.shape[1:] == self.pts3d.shape[1:]:
                     self.pts3d = ep_pts.copy()
+                    if ep_pts.shape[0] != self.pts3d_orig.shape[0]:   # baked
+                        self.pts3d_orig = ep_pts.copy()
+                        self.pts3d_was_nan = None
             except Exception:
                 pass
         # An in-session edit (freshest) overrides the on-disk one.
@@ -986,18 +994,18 @@ class SkeletonCorrector(QMainWindow):
         if (cached is not None and cached.get("source") == used
                 and cached["pts"].shape == self.pts3d.shape):
             self.pts3d = cached["pts"].astype(np.float64).copy()
-        self.pts3d_was_nan = was_nan
         self.csv_fps = fps
         self.videos = act["videos"]
         self.caps = caps
         self.vfps = vfps
-        self.vtotal = min_vtotal if min_vtotal > 0 else pts3d.shape[0]
+        self.vtotal = min_vtotal if min_vtotal > 0 else self.pts3d.shape[0]
         self._raw_vtotal = self.vtotal
         self._view_offsets.clear()
 
-        # Build the frame mapping for this clip (ratio/pfps derived inside).
-        # skel_offset is restored from progress just below.
-        self.timeline = Timeline(pts3d.shape[0], self.vtotal, self.vfps)
+        # Frame mapping from the ACTUAL working skeleton (may be a baked/trimmed
+        # _edited.pkl) and the (possibly trimmed) videos -> correct ratio either
+        # way. skel_offset is restored from progress just below.
+        self.timeline = Timeline(self.pts3d.shape[0], self.vtotal, self.vfps)
 
         self.cur_frame = 0
         self.undo_stack.clear()
@@ -1290,6 +1298,11 @@ class SkeletonCorrector(QMainWindow):
         self.skel_off_spin.blockSignals(True)
         self.skel_off_spin.setValue(0)
         self.skel_off_spin.blockSignals(False)
+        # Frames are re-indexed now; the stored offsets/keyframes are stale.
+        self._progress[tag] = {**self._progress.get(tag, {}), "skel_offset": 0,
+                               "view_offsets": {}, "keyframes": [],
+                               "edited_joints": []}
+        self._write_progress_json()
         self.timeline = Timeline(trimmed.shape[0], self.vtotal, self.vfps)
         self.cur_frame = 0
         self._recalc_play_range()
