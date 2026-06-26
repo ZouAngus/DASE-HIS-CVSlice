@@ -56,7 +56,7 @@ from cvslice.vision.projection import (
 )
 from cvslice.vision.propagation import (
     SMPL24_PARENTS, enforce_bone_lengths, interpolate_all_joints,
-    interpolate_with_repair,
+    interpolate_with_repair, interpolate_per_joint,
     reference_bone_lengths, smooth_post_process,
 )
 
@@ -155,6 +155,12 @@ class SkeletonCorrector(QMainWindow):
 
         # Keyframes (skeleton/pts3d frame indices) for all-joint interpolation
         self._keyframes: list[int] = []
+        # Per-joint authored frames ("pins"): frame -> set of joints the user
+        # actually placed there. Interpolation fills each joint only between its
+        # OWN pins, so corrections accumulate instead of being recomputed for
+        # all joints every pass. Recorded at drag/copy time (NOT derived from
+        # "differs from source", which post-interp values would corrupt).
+        self._kf_joints: dict[int, set[int]] = {}
 
         # Lazily-created 2D pose detector for the consistency check.
         self._pose2d = None
@@ -1011,6 +1017,7 @@ class SkeletonCorrector(QMainWindow):
         self.undo_stack.clear()
         self.edited_joints.clear()
         self._keyframes.clear()
+        self._kf_joints.clear()
         self._tv2d.clear()
         self._selected_joint = None
         self.sel_joint_lbl.setText("选中关节: -")
@@ -1038,6 +1045,18 @@ class SkeletonCorrector(QMainWindow):
                 self._keyframes.append(k)
         self._keyframes.sort()
         self._refresh_kf_list()
+        # Restore per-joint pins (frame -> set of authored joints).
+        for f, joints in (saved.get("kf_joints", {}) or {}).items():
+            try:
+                f = int(f)
+            except (TypeError, ValueError):
+                continue
+            if not (0 <= f < pts3d.shape[0]):
+                continue
+            js = {int(j) for j in joints
+                  if isinstance(j, int) and 0 <= int(j) < pts3d.shape[1]}
+            if js:
+                self._kf_joints.setdefault(f, set()).update(js)
 
         self.skel_off_spin.blockSignals(True)
         self.skel_off_spin.setValue(self._skel_offset)
@@ -1277,6 +1296,7 @@ class SkeletonCorrector(QMainWindow):
         self._edited.pop(tag, None)
         self.edited_joints.clear()
         self._keyframes.clear()
+        self._kf_joints.clear()
         self._tv2d.clear()
         self.undo_stack.clear()
         self._frame_cache.clear()
@@ -1450,6 +1470,8 @@ class SkeletonCorrector(QMainWindow):
             "view_offsets": {k: int(v) for k, v in self._view_offsets.items()},
             "edited_joints": sorted(self.edited_joints),
             "keyframes": sorted(int(k) for k in self._keyframes),
+            "kf_joints": {str(int(f)): sorted(int(j) for j in js)
+                          for f, js in self._kf_joints.items() if js},
         }
         self._progress[tag] = {**self._progress.get(tag, {}), **entry}
         # Cache the skeleton only if it actually differs from the loaded data;
@@ -1795,6 +1817,9 @@ class SkeletonCorrector(QMainWindow):
             new_p = unproject_2d_to_3d(x, y, self._drag_z, K, R, t, dist)
         self.pts3d[pidx, joint] = new_p
         self.edited_joints.add(joint)
+        # Pin this joint at this frame: it's now user-authored ground truth.
+        # Per-joint interpolation fills only between a joint's own pins.
+        self._kf_joints.setdefault(pidx, set()).add(joint)
         self._show_frame()
 
     def _on_release(self, side: str, x: int, y: int) -> None:
@@ -1858,6 +1883,7 @@ class SkeletonCorrector(QMainWindow):
         self.pts3d = self.pts3d_orig.copy()
         self.edited_joints.clear()
         self._keyframes.clear()
+        self._kf_joints.clear()
         self._tv2d.clear()
         # Forget any saved edit for this action so reopening shows the original
         # (undo restores it in memory; re-saving writes the _edited.pkl again).
@@ -2274,6 +2300,8 @@ class SkeletonCorrector(QMainWindow):
             return
         self._push_undo()
         self.pts3d[pidx] = self.pts3d[src].copy()
+        # Copying a whole known-good pose authors every joint at this frame.
+        self._kf_joints.setdefault(pidx, set()).update(range(self.pts3d.shape[1]))
         if pidx not in self._keyframes:
             self._keyframes.append(pidx)
             self._keyframes.sort()
@@ -2388,7 +2416,12 @@ class SkeletonCorrector(QMainWindow):
         row = self.kf_list.currentRow()
         kfs = sorted(self._keyframes)
         if 0 <= row < len(kfs):
-            self._keyframes.remove(kfs[row])
+            f = kfs[row]
+            self._keyframes.remove(f)
+            # Drop this frame's per-joint pins too, so the visible keyframe list
+            # and the authored pins stay in sync (no orphan knot in per-joint
+            # interpolation after you delete the keyframe).
+            self._kf_joints.pop(f, None)
             self._refresh_kf_list()
 
     def _on_kf_clicked(self, item) -> None:
@@ -2398,30 +2431,81 @@ class SkeletonCorrector(QMainWindow):
             self.cur_frame = max(self._play_lo, min(self._play_hi, self._p2v(kfs[row])))
             self.slider.setValue(self.cur_frame)
 
+    def _build_joint_keyframes(self) -> dict:
+        """Map joint -> sorted authored frames ("pins") for per-joint interp.
+
+        Pins recorded at drag/copy time win and stay DECOUPLED (a joint with
+        >=2 precise pins is filled only between its own pins, so authoring one
+        joint never reshapes another -> corrections accumulate). Edited joints
+        that don't yet have >=2 precise pins fall back to the global keyframe
+        list (old all-edited-joint behaviour), so legacy/old-session data and
+        single-pin joints still interpolate. Joints the user never touched are
+        absent -> left untouched."""
+        if self.pts3d is None:
+            return {}
+        T, J = self.pts3d.shape[0], self.pts3d.shape[1]
+        jk: dict[int, set[int]] = {}
+        for f, joints in self._kf_joints.items():
+            if not (0 <= int(f) < T):
+                continue
+            for j in joints:
+                if 0 <= int(j) < J:
+                    jk.setdefault(int(j), set()).add(int(f))
+        glob = [k for k in sorted(self._keyframes) if 0 <= k < T]
+        if len(glob) >= 2:
+            for j in self.edited_joints:
+                j = int(j)
+                if 0 <= j < J and len(jk.get(j, ())) < 2:
+                    jk.setdefault(j, set()).update(glob)
+        return {j: sorted(fs) for j, fs in jk.items() if len(fs) >= 2}
+
     def _interp_keyframes(self) -> None:
         if self.pts3d is None:
             return
+        method = self.kf_method.currentText()
+        has_orig = (self.pts3d_orig is not None
+                    and self.pts3d_orig.shape == self.pts3d.shape)
+        jk = self._build_joint_keyframes()
+        # Per-joint, cumulative interpolation: fill EACH joint only between its
+        # own authored keyframes. Joints you didn't pin (this pass or ever) are
+        # left untouched, and a pinned joint's curve depends only on its own
+        # pins -> fixing the lower body then the upper body no longer disturbs
+        # either one. (Old behaviour recomputed every joint over one global
+        # range with shared knots, so each pass moved already-good joints.)
+        if jk and has_orig:
+            smooth = float(self.kf_smooth.value())
+            self._push_undo()
+            out, _rep, _n, sig = interpolate_per_joint(
+                self.pts3d, self.pts3d_orig, jk, method,
+                parents=SMPL24_PARENTS, smooth=smooth)
+            self.pts3d = out
+            self._show_frame()
+            npins = sum(len(fs) for fs in jk.values())
+            QMessageBox.information(
+                self, "插值(逐关节·累积)",
+                f"已对 {len(jk)} 个有关键帧的关节,各自在其关键帧之间插值"
+                f"(共 {npins} 个关键点,σ≤{sig:.1f})。\n\n"
+                f"逐关节累积:只修改你给该关节标过关键帧的区间;\n"
+                f"这次没碰的关节、以及之前已标好的其它关节都保持不变 ——\n"
+                f"所以纠完下半身再纠上半身,先标好的关节不会被重新插值改动。\n\n"
+                f"区间内已自动:就地修复坏的源帧、软化手标抖动"
+                f"(曲线落在关键帧附近而非硬穿过;想更贴合可调小「软平滑」)。")
+            return
+        # Fallback: no per-joint pins yet (e.g. keyframes set but nothing
+        # edited, or pristine source unavailable) -> old global interpolation.
         if len(self._keyframes) < 2:
             QMessageBox.information(self, "插值", "至少需要 2 个关键帧。")
             return
-        method = self.kf_method.currentText()
         kfs = sorted(self._keyframes)
         fa, fb = kfs[0], kfs[-1]
         self._push_undo()
-        # Offset-space interpolation with auto-repair: ride small smooth
-        # corrections on the source baseline, but first auto-detect broken
-        # source cells (bone-length / position-pop) and inpaint them locally, so
-        # joints that are bad mid-gap but were NOT dragged still get fixed in one
-        # click (the main reason "interpolate then it's still wrong" happened).
-        sig = 0.0
-        if self.pts3d_orig is not None and self.pts3d_orig.shape == self.pts3d.shape:
+        if has_orig:
             smooth = float(self.kf_smooth.value())
             res, _rep, _n, sig = interpolate_with_repair(
                 self.pts3d, self.pts3d_orig, fa, fb, method,
                 keyframes=kfs, dragged_joints=set(self.edited_joints),
                 parents=SMPL24_PARENTS, smooth=smooth)
-            mode = (f"{method}/相对修正; 你拖了 {len(self.edited_joints)} 个关节; "
-                    f"软化关键帧 σ={sig:.1f}")
+            mode = f"{method}/相对修正; 软化关键帧 σ={sig:.1f}"
         else:
             res = interpolate_all_joints(self.pts3d, fa, fb, method, keyframes=kfs)
             mode = method
@@ -2430,12 +2514,8 @@ class SkeletonCorrector(QMainWindow):
         QMessageBox.information(
             self, "插值",
             f"已在 skel[{fa}..{fb}] 间按 {len(kfs)} 个关键帧插值。\n{mode}\n\n"
-            f"已自动处理(无需回头反复检查):\n"
-            f"• 坏帧修复: 你没拖、但中间帧坏掉的关节(含脚部等)按关键帧/邻帧修好;\n"
-            f"• 短抖动清理: 脚踝/脚等未编辑关节里 3–5 帧的高频抖动就地抹平,"
-            f"真实快速动作保留;\n"
-            f"• 软化关键帧(σ={sig:.1f}): 去掉手标关键帧不一致造成的抖动"
-            f"(曲线落在关键帧附近而非硬穿过)。想更贴合手标位置可调小「软平滑」。")
+            f"提示:拖动关节后再插值即可启用「逐关节累积」模式"
+            f"(每个关节只在它自己的关键帧之间插值,互不影响)。")
 
     # ------------------------------------------------ camera-guided fill
     def _camera_guided_fill(self) -> None:

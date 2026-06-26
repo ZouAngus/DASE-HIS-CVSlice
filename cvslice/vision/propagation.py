@@ -701,6 +701,127 @@ def interpolate_with_repair(pts_edited: np.ndarray, pts_orig: np.ndarray,
     return res, repaired_joints, n_repaired, eff_smooth
 
 
+def interpolate_per_joint(pts_edited: np.ndarray, pts_orig: np.ndarray,
+                          joint_keyframes: dict, method: str = "pchip",
+                          parents=None, smooth: float = 0.0,
+                          auto_soft: bool = True,
+                          bone_tol: float = 0.08, accel_frac: float = 0.8):
+    """Cumulative, *per-joint* keyframe interpolation.
+
+    ``joint_keyframes`` maps ``joint_index -> [frame, ...]`` — the frames where
+    THAT joint was authored (pinned by the user). Each joint is filled ONLY
+    between its own first and last pin, using its own pin values and its own
+    soft-smoothing sigma. Joints absent from the dict (or with < 2 pins) are
+    left EXACTLY as they are in ``pts_edited``.
+
+    Why per-joint: the old global recompute rewrote every joint over one global
+    ``[first_kf..last_kf]`` range from the pristine source, with all keyframes
+    as shared knots and a single global sigma. That made interpolation
+    non-cumulative — fixing the lower body then interpolating disturbed the
+    untouched upper body, and later adding a keyframe for the upper body
+    reshaped the already-good lower-body curve (new knot + new global sigma).
+    Here a joint's result depends ONLY on its own pins and its own source, so
+    authoring one joint never moves another: corrections accumulate.
+
+    Within a joint's ``[first..last pin]`` span, broken SOURCE cells of that
+    joint are inpainted from good neighbours (auto-repair) before an
+    offset-mode interpolation that rides the (repaired) smooth source detail and
+    threads a small correction through the pins — keeping real in-between motion
+    (important for fast cyclic motion that's under-keyframed). If the source is
+    too broken to inpaint, that joint falls back to pure replace-mode
+    interpolation between its pin values.
+
+    Returns (result_full (T,J,3), repaired_joints set, n_repaired_cells,
+    max_sigma_used).
+    """
+    pts_edited = np.asarray(pts_edited, float)
+    pts_orig = np.asarray(pts_orig, float)
+    T, J, _ = pts_edited.shape
+    parents = parents if parents is not None else SMPL24_PARENTS
+    out = pts_edited.copy()
+    if not joint_keyframes:
+        return out, set(), 0, 0.0
+
+    # Source-glitch mask over the whole clip (cheap; sliced per joint below).
+    detected = detect_bad_frames(pts_orig, parents, bone_tol, accel_frac)
+    # Bone scale for the "did the repair actually move it" threshold.
+    bl = []
+    for j in range(J):
+        p = parents[j] if j < len(parents) else -1
+        if 0 <= p < J:
+            d = np.linalg.norm(pts_orig[:, j] - pts_orig[:, p], axis=1)
+            d = d[np.isfinite(d)]
+            if d.size:
+                bl.append(np.median(d))
+    thr = 0.006 * (float(np.median(bl)) if bl else 1.0)
+
+    repaired_joints = set()
+    n_repaired = 0
+    max_sigma = 0.0
+    for j, frames in joint_keyframes.items():
+        j = int(j)
+        if not (0 <= j < J):
+            continue
+        pins = sorted({int(f) for f in frames
+                       if 0 <= int(f) < T
+                       and np.all(np.isfinite(pts_edited[int(f), j]))})
+        if len(pins) < 2:
+            continue                              # need a span to fill
+        fa, fb = pins[0], pins[-1]
+        knots = np.asarray(pins, dtype=float)
+        target = np.arange(fa, fb + 1)
+
+        # Per-joint soft sigma from THIS joint's own pin spacing (averages
+        # hand-placement noise at the density the user annotated this joint).
+        sigma = 0.0
+        if auto_soft and len(pins) >= 3:
+            sp = float(np.median(np.diff(pins)))
+            sigma = min(0.8 * sp, 10.0)
+        eff = max(float(smooth), sigma)
+        max_sigma = max(max_sigma, eff)
+
+        # Repaired source window for this joint.
+        winb = pts_orig[fa:fb + 1, j].copy()      # (n, 3) smooth baseline
+        n = winb.shape[0]
+        loc = np.arange(n)
+        bad_w = detected[fa:fb + 1, j].copy()
+        good_w = (~bad_w) & np.isfinite(winb).all(axis=1)
+        use_replace = False
+        if bad_w.any():
+            if good_w.sum() >= 2:
+                before = winb[bad_w].copy()
+                for d in range(3):
+                    winb[bad_w, d] = np.interp(loc[bad_w], loc[good_w],
+                                               winb[good_w, d])
+                moved = int((np.linalg.norm(winb[bad_w] - before, axis=1)
+                             > thr).sum())
+                if moved:
+                    n_repaired += moved
+                    repaired_joints.add(j)
+            else:
+                use_replace = True                # no anchors -> keyframes only
+
+        if use_replace or not np.isfinite(winb).all():
+            # Pure replace: thread the authored pin values directly.
+            kv = np.array([pts_edited[p, j] for p in pins])
+            for d in range(3):
+                vals = _interp_axis(target, knots, kv[:, d], method)
+                if eff > 0:
+                    vals = _gaussian_smooth(vals, eff)
+                out[fa:fb + 1, j, d] = vals
+        else:
+            # Offset mode: ride the (repaired) smooth source + a small smooth
+            # correction threaded through the pins. Smooth only the correction
+            # (the source is already smooth), so real motion detail is kept.
+            delta = np.array([pts_edited[p, j] - winb[p - fa] for p in pins])
+            for d in range(3):
+                di = _interp_axis(target, knots, delta[:, d], method)
+                if eff > 0:
+                    di = _gaussian_smooth(di, eff)
+                out[fa:fb + 1, j, d] = winb[:, d] + di
+    return out, repaired_joints, n_repaired, max_sigma
+
+
 def apply_bulk_offset_all_joints(pts3d: np.ndarray,
                                  frame_start: int, frame_end: int,
                                  deltas: np.ndarray,
