@@ -1074,6 +1074,19 @@ class SkeletonCorrector(QMainWindow):
         """Map pts3d (skeleton) frame index to video frame index."""
         return self.timeline.skel_to_video(pidx)
 
+    def _aligned_skel_range(self) -> tuple[int, int]:
+        """Skeleton-frame span [lo, hi] that maps to the offset-valid video
+        window [_play_lo, _play_hi]. Frames outside are the ones the time offset
+        pushes past the video ends — dropped when exporting an aligned pkl."""
+        if self.pts3d is None:
+            return 0, 0
+        n = self.pts3d.shape[0]
+        lo = max(0, min(n - 1, self._v2p(self._play_lo)))
+        hi = max(0, min(n - 1, self._v2p(self._play_hi)))
+        if hi < lo:
+            return 0, n - 1
+        return lo, hi
+
     def _save(self) -> None:
         """Save the edited skeleton via the active source.
 
@@ -1090,14 +1103,25 @@ class SkeletonCorrector(QMainWindow):
             tag = (self._actions[self._cur_action_idx]["tag"]
                    if self._cur_action_idx >= 0 else "edited")
 
+            # Trim to the offset-valid window: with a time offset some skeleton
+            # frames fall outside the video range, so the exported (aligned) pkl
+            # drops them. The working _edited.pkl stays full-length for editing.
+            lo, hi = self._aligned_skel_range()
+            n_full = self.pts3d.shape[0]
+            trimmed = lo > 0 or hi < n_full - 1
+
             if src.output_ext == "pkl":
+                pts_to_save = self.pts3d[lo:hi + 1]
                 default = src.default_output_path(self.folder, tag)
+                if trimmed and default.endswith("_edited.pkl"):
+                    default = default[:-len("_edited.pkl")] + "_aligned.pkl"
                 target, _ = QFileDialog.getSaveFileName(
                     self, "保存编辑后的骨架 (PKL)", default, "Pickle Files (*.pkl)")
                 if not target:
                     return
             else:
-                # CSV: overwrite in place (back up once) to match prior behavior.
+                # CSV: overwrite source in place (back up once); not trimmed.
+                pts_to_save = self.pts3d
                 target = self.csv_path or src.default_output_path(self.folder, tag)
                 if not self.csv_path:
                     target, _ = QFileDialog.getSaveFileName(
@@ -1114,13 +1138,19 @@ class SkeletonCorrector(QMainWindow):
                             pass
 
             try:
-                src.save(self.pts3d, target)
+                src.save(pts_to_save, target)
             except Exception as e:
                 QMessageBox.warning(self, "保存失败", str(e))
                 return
-            shape = tuple(np.asarray(self.pts3d).shape)
+            shape = tuple(np.asarray(pts_to_save).shape)
+            crop = ""
+            if trimmed and src.output_ext == "pkl":
+                crop = (f"\n已按时间 offset 裁切: 骨架 {n_full}→{hi - lo + 1} 帧 "
+                        f"(对齐到视频窗口 [{self._play_lo}–{self._play_hi}])。\n"
+                        f"把视频也裁到该窗口即逐帧对齐;完整未裁版仍在 _edited.pkl。")
             QMessageBox.information(
-                self, "已保存", f"已写入: {os.path.basename(target)}  shape={shape}")
+                self, "已保存",
+                f"已写入: {os.path.basename(target)}  shape={shape}{crop}")
         finally:
             if was_playing:
                 self.play_btn.setChecked(True)
