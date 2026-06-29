@@ -773,10 +773,20 @@ def interpolate_per_joint(pts_edited: np.ndarray, pts_orig: np.ndarray,
 
         # Per-joint soft sigma from THIS joint's own pin spacing (averages
         # hand-placement noise at the density the user annotated this joint).
+        # CRITICAL: cap by the SMALLEST gap, not just the median. A close pair
+        # of keyframes (e.g. gap 2) among normally-spaced ones has a large
+        # median, so a median-only sigma (up to 10) would smooth a Gaussian far
+        # wider than the close gap — ignoring those keyframes and dragging the
+        # un-pinned frame(s) between them toward the surrounding trend ("插帧后
+        # 中间 1-2 帧被拉飞错位"). Limiting sigma to ~half the smallest gap keeps
+        # the kernel from ever spanning a close pair, so close keyframes are
+        # honoured; sparse regions (all gaps large) are unaffected.
         sigma = 0.0
         if auto_soft and len(pins) >= 3:
-            sp = float(np.median(np.diff(pins)))
-            sigma = min(0.8 * sp, 10.0)
+            gaps = np.diff(pins)
+            sp = float(np.median(gaps))
+            min_gap = float(np.min(gaps))
+            sigma = min(0.8 * sp, 10.0, 0.5 * min_gap)
         eff = max(float(smooth), sigma)
         max_sigma = max(max_sigma, eff)
 
