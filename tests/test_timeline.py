@@ -26,10 +26,11 @@ def _ref_v2p(vframe, ratio, n, off):
     return max(0, min(n - 1, idx))
 
 
-def _ref_p2v(pidx, ratio):
+def _ref_p2v(pidx, ratio, off):
+    # Inverse of _ref_v2p: must undo the skel_offset too.
     if ratio <= 0:
-        return pidx
-    return int(round(pidx / ratio))
+        return int(pidx) - off
+    return int(round(pidx / ratio)) - off
 
 
 def test_timeline_matches_reference():
@@ -48,7 +49,7 @@ def test_timeline_matches_reference():
                 assert tl.video_to_skel(vf) == _ref_v2p(vf, ratio_ref, n, off), \
                     (n, vtotal, vfps, off, vf)
             for p in range(0, max(1, n), 7):
-                assert tl.skel_to_video(p) == _ref_p2v(p, ratio_ref), (n, vtotal, vfps, p)
+                assert tl.skel_to_video(p) == _ref_p2v(p, ratio_ref, off), (n, vtotal, vfps, off, p)
 
 
 def test_clamping():

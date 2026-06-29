@@ -704,7 +704,7 @@ def interpolate_with_repair(pts_edited: np.ndarray, pts_orig: np.ndarray,
 def interpolate_per_joint(pts_edited: np.ndarray, pts_orig: np.ndarray,
                           joint_keyframes: dict, method: str = "pchip",
                           parents=None, smooth: float = 0.0,
-                          auto_soft: bool = True,
+                          auto_soft: bool = True, mode: str = "replace",
                           bone_tol: float = 0.08, accel_frac: float = 0.8):
     """Cumulative, *per-joint* keyframe interpolation.
 
@@ -723,13 +723,18 @@ def interpolate_per_joint(pts_edited: np.ndarray, pts_orig: np.ndarray,
     Here a joint's result depends ONLY on its own pins and its own source, so
     authoring one joint never moves another: corrections accumulate.
 
-    Within a joint's ``[first..last pin]`` span, broken SOURCE cells of that
-    joint are inpainted from good neighbours (auto-repair) before an
-    offset-mode interpolation that rides the (repaired) smooth source detail and
-    threads a small correction through the pins — keeping real in-between motion
-    (important for fast cyclic motion that's under-keyframed). If the source is
-    too broken to inpaint, that joint falls back to pure replace-mode
-    interpolation between its pin values.
+    ``mode``:
+    * ``"replace"`` (default) — fill the span with a clean interpolation
+      THROUGH the corrected keyframe poses, ignoring the source in between.
+      Stable: the in-between can never be flung beyond the keyframe values
+      (PChip is overshoot-free). Use this when the source motion between
+      keyframes is unreliable (the usual QC case).
+    * ``"offset"`` — ride the (auto-repaired) source motion between keyframes
+      and thread the keyframes' *correction* on top. Keeps real in-between
+      motion detail (good for under-keyframed fast cyclic motion), but if the
+      source error is localized (joint wrong AT the keyframes, fine in between)
+      it dumps the keyframes' correction onto the already-good frame and flings
+      it — so it is NOT the default.
 
     Returns (result_full (T,J,3), repaired_joints set, n_repaired_cells,
     max_sigma_used).
@@ -789,6 +794,18 @@ def interpolate_per_joint(pts_edited: np.ndarray, pts_orig: np.ndarray,
             sigma = min(0.8 * sp, 10.0, 0.5 * min_gap)
         eff = max(float(smooth), sigma)
         max_sigma = max(max_sigma, eff)
+
+        if mode == "replace":
+            # Thread a clean curve THROUGH the corrected keyframe poses; the
+            # source in between is ignored, so a good in-between frame can never
+            # be flung by a large correction made at the keyframes.
+            kv = np.array([pts_edited[p, j] for p in pins])
+            for d in range(3):
+                vals = _interp_axis(target, knots, kv[:, d], method)
+                if eff > 0:
+                    vals = _gaussian_smooth(vals, eff)
+                out[fa:fb + 1, j, d] = vals
+            continue
 
         # Repaired source window for this joint.
         winb = pts_orig[fa:fb + 1, j].copy()      # (n, 3) smooth baseline

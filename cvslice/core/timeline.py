@@ -48,7 +48,14 @@ class Timeline:
         return max(0, min(self.n_skel - 1, idx))
 
     def skel_to_video(self, pidx: int) -> int:
-        """Map a skeleton frame index back to a video-clip frame index."""
+        """Map a skeleton frame index back to a video-clip frame index.
+
+        This is the inverse of ``video_to_skel``, so it MUST undo the
+        ``skel_offset`` as well. Otherwise, with an offset set, a keyframe
+        (stored as a skel index) maps to the wrong video frame: the keyframe
+        list navigates to the wrong place and the keyframe badge never lights
+        up (``video_to_skel`` re-adds the offset and lands ``offset*ratio``
+        frames away from the keyframe)."""
         if self.ratio <= 0:
-            return int(pidx)
-        return int(round(pidx / self.ratio))
+            return int(pidx) - self.skel_offset
+        return int(round(pidx / self.ratio)) - self.skel_offset

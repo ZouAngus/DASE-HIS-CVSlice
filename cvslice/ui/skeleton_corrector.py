@@ -448,6 +448,15 @@ class SkeletonCorrector(QMainWindow):
             ">0 = 在自动基础上再加强;想更贴合手标位置就调小/设很小的值。")
         smooth_row.addWidget(self.kf_smooth, 1)
         kfl.addLayout(smooth_row)
+        self.offset_mode_cb = QCheckBox("保留原始运动细节 (offset)")
+        self.offset_mode_cb.setChecked(False)   # default = replace (stable)
+        self.offset_mode_cb.setToolTip(
+            "默认(不勾)= replace: 关键帧之间画一条干净的曲线『穿过你修正后的关键帧"
+            "姿态』,忽略中间原始动作。最稳,中间帧绝不会被甩飞。\n"
+            "勾上 = offset: 保留中间的原始运动细节,只把关键帧上的修正量平滑地加上去。"
+            "适合关键帧很稀疏的快速往复动作;但若某关节只是『在关键帧那几帧错、中间本来"
+            "是对的』,offset 会把关键帧的大修正也加到那个对的帧上,导致它被甩飞。")
+        kfl.addWidget(self.offset_mode_cb)
         interp_btn = QPushButton("在关键帧间插值 (全关节)")
         interp_btn.setToolTip(
             "先在若干帧上修好骨架并各加一个关键帧,再插值。编辑过的关节用关键帧"
@@ -1591,7 +1600,15 @@ class SkeletonCorrector(QMainWindow):
         corner badge so it's obvious at a glance — not tied to the skeleton."""
         if self.pts3d is None or not self._keyframes:
             return
-        if self._v2p(self.cur_frame) not in self._keyframes:
+        # Match in BOTH spaces. skel-space (`_v2p in keyframes`) covers ratio<=1,
+        # where many video frames map to one keyframe so the badge shows across
+        # the whole range. video-space (`cur_frame in {_p2v(k)}`) covers ratio>1
+        # (skeleton denser than video): then a keyframe has ~one exact video
+        # frame and _v2p rarely lands on it — but _p2v(k) is exactly where the
+        # keyframe list navigates, so the badge now lights up there reliably.
+        pidx = self._v2p(self.cur_frame)
+        if (pidx not in self._keyframes
+                and self.cur_frame not in {self._p2v(k) for k in self._keyframes}):
             return
         h, w = frm.shape[:2]
         amber = (0, 200, 255)   # BGR
@@ -2520,22 +2537,26 @@ class SkeletonCorrector(QMainWindow):
         # range with shared knots, so each pass moved already-good joints.)
         if jk and has_orig:
             smooth = float(self.kf_smooth.value())
+            mode = "offset" if self.offset_mode_cb.isChecked() else "replace"
             self._push_undo()
             out, _rep, _n, sig = interpolate_per_joint(
                 self.pts3d, self.pts3d_orig, jk, method,
-                parents=SMPL24_PARENTS, smooth=smooth)
+                parents=SMPL24_PARENTS, smooth=smooth, mode=mode)
             self.pts3d = out
             self._show_frame()
             npins = sum(len(fs) for fs in jk.values())
+            mode_desc = ("replace(稳): 关键帧之间画干净曲线穿过你修正后的姿态,"
+                         "中间帧不会被甩飞"
+                         if mode == "replace" else
+                         "offset(细节): 保留中间原始运动 + 叠加修正;"
+                         "若中间『本来对的』帧被甩飞,请取消勾选「保留原始运动细节」")
             QMessageBox.information(
                 self, "插值(逐关节·累积)",
                 f"已对 {len(jk)} 个有关键帧的关节,各自在其关键帧之间插值"
                 f"(共 {npins} 个关键点,σ≤{sig:.1f})。\n\n"
+                f"模式:{mode_desc}\n\n"
                 f"逐关节累积:只修改你给该关节标过关键帧的区间;\n"
-                f"这次没碰的关节、以及之前已标好的其它关节都保持不变 ——\n"
-                f"所以纠完下半身再纠上半身,先标好的关节不会被重新插值改动。\n\n"
-                f"区间内已自动:就地修复坏的源帧、软化手标抖动"
-                f"(曲线落在关键帧附近而非硬穿过;想更贴合可调小「软平滑」)。")
+                f"这次没碰的关节、以及之前已标好的其它关节都保持不变。")
             return
         # Fallback: no per-joint pins yet (e.g. keyframes set but nothing
         # edited, or pristine source unavailable) -> old global interpolation.
