@@ -120,9 +120,12 @@ class SkeletonCorrector(QMainWindow):
 
         # Per-camera view offset (small integer, shifts video read position)
         self._view_offsets: dict[str, int] = {}  # {cam_name: offset_frames}
-        # Skeleton-vs-video time offset, in video frames (±10). Positive means
-        # the skeleton plays that many video frames *ahead* of the footage.
+        # Skeleton-vs-video time offset, in video frames. Positive means the
+        # skeleton plays that many video frames *ahead* of the footage. The
+        # range is the clip length (set per-clip in _update_offset_ranges), not
+        # a fixed cap.
         self._skel_offset: int = 0
+        self._off_bound: int = 1000  # offset spin range (±); per-clip on load
         self._raw_vtotal: int = 0  # original video frame count before trimming
 
         # Persisted progress (per action tag), loaded from corrector_progress.json
@@ -539,22 +542,22 @@ class SkeletonCorrector(QMainWindow):
         vo_g = QGroupBox("时间对齐 (Offset)")
         vof = QFormLayout(vo_g)
         self.skel_off_spin = QSpinBox()
-        self.skel_off_spin.setRange(-10, 10)
+        self.skel_off_spin.setRange(-self._off_bound, self._off_bound)
         self.skel_off_spin.setValue(0)
         self.skel_off_spin.valueChanged.connect(self._on_skel_offset_changed)
         vof.addRow("骨骼时间:", self.skel_off_spin)
         self.vo_top_spin = QSpinBox()
-        self.vo_top_spin.setRange(-10, 10)
+        self.vo_top_spin.setRange(-self._off_bound, self._off_bound)
         self.vo_top_spin.setValue(0)
         self.vo_top_spin.valueChanged.connect(self._on_view_offset_changed)
         vof.addRow("上视图:", self.vo_top_spin)
         self.vo_bot_spin = QSpinBox()
-        self.vo_bot_spin.setRange(-10, 10)
+        self.vo_bot_spin.setRange(-self._off_bound, self._off_bound)
         self.vo_bot_spin.setValue(0)
         self.vo_bot_spin.valueChanged.connect(self._on_view_offset_changed)
         vof.addRow("下视图:", self.vo_bot_spin)
-        vo_g.setToolTip("骨骼时间: 整体平移骨骼帧 (±10) 对齐视频。\n"
-                        "上/下视图: 各相机微调 (±10)。\n"
+        vo_g.setToolTip("骨骼时间: 整体平移骨骼帧对齐视频(范围=整段长度)。\n"
+                        "上/下视图: 各相机微调。\n"
                         "超出范围的帧会被裁掉。")
         bake_btn = QPushButton("✂️ 裁切对齐 (pkl + 所有视频, 原地)")
         bake_btn.setStyleSheet("font-weight:bold;")
@@ -1007,6 +1010,7 @@ class SkeletonCorrector(QMainWindow):
         self.vtotal = min_vtotal if min_vtotal > 0 else self.pts3d.shape[0]
         self._raw_vtotal = self.vtotal
         self._view_offsets.clear()
+        self._update_offset_ranges()    # offset spins span the whole clip
 
         # Frame mapping from the ACTUAL working skeleton (may be a baked/trimmed
         # _edited.pkl) and the (possibly trimmed) videos -> correct ratio either
@@ -1024,12 +1028,12 @@ class SkeletonCorrector(QMainWindow):
 
         # Restore persisted per-action progress (offsets / edited joints).
         saved = self._progress.get(act["tag"], {})
-        self._skel_offset = int(saved.get("skel_offset", 0))
-        self._skel_offset = max(-10, min(10, self._skel_offset))
+        b = self._off_bound
+        self._skel_offset = max(-b, min(b, int(saved.get("skel_offset", 0))))
         saved_vo = saved.get("view_offsets", {})
         for cn, off in saved_vo.items():
             try:
-                self._view_offsets[cn] = max(-10, min(10, int(off)))
+                self._view_offsets[cn] = max(-b, min(b, int(off)))
             except (TypeError, ValueError):
                 pass
         for j in saved.get("edited_joints", []):
@@ -1317,6 +1321,7 @@ class SkeletonCorrector(QMainWindow):
         self.vtotal = min_vtot if min_vtot < 10 ** 9 else trimmed.shape[0]
         self._raw_vtotal = self.vtotal
         self._view_offsets.clear()
+        self._update_offset_ranges()    # offset spins span the whole clip
         self._skel_offset = 0
         self.skel_off_spin.blockSignals(True)
         self.skel_off_spin.setValue(0)
@@ -2722,9 +2727,23 @@ class SkeletonCorrector(QMainWindow):
         self._show_frame()
 
     # -------------------------------------------------------- view offset
+    def _update_offset_ranges(self) -> None:
+        """Set the offset spin ranges to span the whole clip (no fixed ±10 cap).
+
+        The largest meaningful time shift is the clip length; beyond that the
+        play window is empty (harmless — _recalc_play_range collapses it to a
+        single frame), so this is effectively 'no limit' while staying sane."""
+        caps_max = max([t for t in self._cap_totals.values() if t > 0], default=0)
+        nse = self.pts3d.shape[0] if self.pts3d is not None else 0
+        self._off_bound = max(int(self._raw_vtotal), caps_max, nse, 10)
+        for sp in (self.skel_off_spin, self.vo_top_spin, self.vo_bot_spin):
+            sp.blockSignals(True)
+            sp.setRange(-self._off_bound, self._off_bound)
+            sp.blockSignals(False)
+
     def _on_skel_offset_changed(self, val: int = 0) -> None:
-        """Shift the skeleton in time relative to the video (±10 frames)."""
-        self._skel_offset = max(-10, min(10, int(val)))
+        """Shift the skeleton in time relative to the video (range = clip length)."""
+        self._skel_offset = int(val)   # spinbox range already bounds val
         self._recalc_play_range()   # skel offset changes the skeleton's valid range
         self._show_frame()
 
