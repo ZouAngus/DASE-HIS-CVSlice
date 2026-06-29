@@ -393,6 +393,11 @@ class SkeletonCorrector(QMainWindow):
         del_kf_btn = QPushButton("删除")
         del_kf_btn.clicked.connect(self._del_keyframe)
         kf_btn_row.addWidget(del_kf_btn)
+        clear_kf_btn = QPushButton("清空全部")
+        clear_kf_btn.setToolTip("一键删除所有关键帧及其逐关节标记。\n"
+                                "不影响已调整的骨架姿态,只是清掉关键帧,可重新标。")
+        clear_kf_btn.clicked.connect(self._clear_all_keyframes)
+        kf_btn_row.addWidget(clear_kf_btn)
         kfl.addLayout(kf_btn_row)
         # Seed the current frame from a known-good earlier pose when the current
         # one is wrecked, then fine-tune.
@@ -2431,6 +2436,27 @@ class SkeletonCorrector(QMainWindow):
             # interpolation after you delete the keyframe).
             self._kf_joints.pop(f, None)
             self._refresh_kf_list()
+
+    def _clear_all_keyframes(self) -> None:
+        """One-click: remove ALL keyframes and their per-joint pins. The edited
+        skeleton (pts3d) is untouched — only the keyframe/pin metadata is
+        cleared, so you can re-key from scratch without losing pose corrections.
+        Asks once (not undoable via Ctrl+Z, which only restores poses)."""
+        n = len(self._keyframes)
+        if n == 0 and not self._kf_joints:
+            self.statusBar().showMessage("没有关键帧可清空。")
+            return
+        ans = QMessageBox.question(
+            self, "确认",
+            f"清空全部 {n} 个关键帧(及其逐关节标记)?\n"
+            "不影响已调整的骨架姿态,只是清掉关键帧,之后可重新标。",
+            QMessageBox.Yes | QMessageBox.No)
+        if ans != QMessageBox.Yes:
+            return
+        self._keyframes.clear()
+        self._kf_joints.clear()
+        self._refresh_kf_list()
+        self.statusBar().showMessage(f"已清空 {n} 个关键帧(骨架姿态保持不变)。")
 
     def _on_kf_clicked(self, item) -> None:
         kfs = sorted(self._keyframes)
