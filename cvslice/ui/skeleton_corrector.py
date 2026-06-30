@@ -56,7 +56,7 @@ from cvslice.vision.projection import (
 )
 from cvslice.vision.propagation import (
     SMPL24_PARENTS, enforce_bone_lengths, interpolate_all_joints,
-    interpolate_with_repair, interpolate_per_joint,
+    interpolate_per_joint,
     reference_bone_lengths, smooth_post_process,
 )
 
@@ -373,8 +373,13 @@ class SkeletonCorrector(QMainWindow):
         mg.addWidget(tv_h)
         rp.addWidget(mode_g)
 
-        ej_g = QGroupBox("已编辑关节 (用于平滑)")
+        ej_g = QGroupBox("已编辑关节 / 关键帧数")
         ejl = QVBoxLayout(ej_g)
+        ej_legend = QLabel("视图中关节号配色:绿=≥2关键帧(会插值) "
+                           "橙=仅1帧(不插,需再加) 灰=未编辑;品红点=本帧标注")
+        ej_legend.setWordWrap(True)
+        ej_legend.setStyleSheet("color:#888; font-size:11px;")
+        ejl.addWidget(ej_legend)
         self.edited_list = QListWidget()
         self.edited_list.setMaximumHeight(160)
         ejl.addWidget(self.edited_list)
@@ -1568,12 +1573,23 @@ class SkeletonCorrector(QMainWindow):
                     self._draw_epipolar(frm, cam, side, pidx)
                 draw_skel_with_confidence(frm, proj, nan_mask)
                 hf, wf = frm.shape[:2]
+                # Annotation-state overlay: colour each joint number by how many
+                # keyframes (pins) it has — green = >=2 (will interpolate),
+                # orange = exactly 1 (needs another to connect), grey = none. A
+                # magenta dot marks joints you authored ON THIS frame.
+                pin_counts = self._joint_pin_counts()
+                pinned_here = self._kf_joints.get(pidx, set())
                 for ji in range(len(proj)):
                     jx, jy = int(proj[ji][0]), int(proj[ji][1])
-                    if 0 <= jx < wf and 0 <= jy < hf:
-                        cv2.putText(frm, str(ji), (jx + 5, jy - 5),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.35,
-                                    (200, 200, 200), 1, cv2.LINE_AA)
+                    if not (0 <= jx < wf and 0 <= jy < hf):
+                        continue
+                    c = pin_counts.get(ji, 0)
+                    col = ((0, 220, 0) if c >= 2 else
+                           (0, 170, 255) if c == 1 else (200, 200, 200))
+                    cv2.putText(frm, str(ji), (jx + 5, jy - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, col, 1, cv2.LINE_AA)
+                    if ji in pinned_here:
+                        cv2.circle(frm, (jx, jy), 5, (255, 0, 255), -1)
                 if (self._selected_joint is not None
                         and self._selected_joint < len(proj)):
                     jx, jy = int(proj[self._selected_joint][0]), int(proj[self._selected_joint][1])
@@ -1797,8 +1813,9 @@ class SkeletonCorrector(QMainWindow):
             self.statusBar().showMessage(
                 f"无法开始拖动: 关节 {joint} 在 {cam} 视角下深度无效")
             return
-        self._push_undo()
-        self._undo_pushed_for_drag = True
+        # Do NOT push undo or mark an edit yet. A click with no drag must not
+        # create a keyframe/pin — only an actual move counts (see _on_move).
+        self._undo_pushed_for_drag = False
         self._drag_side = side
         self._drag_cam = cam
         self._drag_joint = joint
@@ -1846,6 +1863,11 @@ class SkeletonCorrector(QMainWindow):
                     new_p = triangulate_two_rays(o1, dir1, o2, dir2)
         if new_p is None:
             new_p = unproject_2d_to_3d(x, y, self._drag_z, K, R, t, dist)
+        # First actual movement of this drag: NOW push undo + count it as an
+        # edit (so a no-move click leaves no keyframe/pin/undo entry).
+        if not self._undo_pushed_for_drag:
+            self._push_undo()
+            self._undo_pushed_for_drag = True
         self.pts3d[pidx, joint] = new_p
         self.edited_joints.add(joint)
         # Pin this joint at this frame: it's now user-authored ground truth.
@@ -2282,8 +2304,16 @@ class SkeletonCorrector(QMainWindow):
     # ------------------------------------------------------ edited joints
     def _refresh_edited_list(self) -> None:
         self.edited_list.clear()
-        for j in sorted(self.edited_joints):
-            self.edited_list.addItem(f"joint {j}")
+        counts = self._joint_pin_counts()
+        # Show every joint you've touched with its keyframe count + whether it
+        # qualifies for interpolation (>=2). Joints with 1 are flagged so you
+        # know to add a second keyframe.
+        joints = sorted(set(self.edited_joints) | set(counts))
+        for j in joints:
+            c = counts.get(j, 0)
+            tag = ("✓ 可插值" if c >= 2 else
+                   "① 需再加1关键帧" if c == 1 else "—")
+            self.edited_list.addItem(f"joint {j}   [{c} 关键帧]  {tag}")
 
     def _clear_edited(self) -> None:
         self.edited_joints.clear()
@@ -2484,19 +2514,12 @@ class SkeletonCorrector(QMainWindow):
             self.slider.setValue(self.cur_frame)
 
     def _build_joint_keyframes(self) -> dict:
-        """Map joint -> sorted authored frames ("pins") to interpolate.
-
-        A joint with >=2 precise pins uses ONLY its own pins, so authoring one
-        joint never reshapes another -> corrections accumulate (decoupled).
-
-        BUT any joint you've edited that does NOT yet have >=2 precise pins
-        still gets the global keyframes as knots. This is essential: you
-        normally fix DIFFERENT joints at DIFFERENT keyframes (an arm wrong at
-        kf A, a leg wrong at kf B), so many corrected joints have only ONE pin.
-        Without this, those joints would be dropped and never connect between
-        keyframes ("中间帧没被插帧") — the exact bug this restores. With it, a
-        joint dragged only at A interpolates A(edited)->B(current) across the
-        range. Joints never touched stay absent -> untouched."""
+        """Map joint -> sorted authored frames ("pins"). STRICT: a joint is
+        interpolated ONLY if it has >=2 of its own pins, between those pins.
+        Each joint uses only its own pins, so authoring one joint never reshapes
+        another (decoupled / cumulative). Joints with <2 pins are NOT
+        interpolated here — the caller reports them so you know to add a 2nd
+        keyframe (explicit beats a silent global-keyframe fallback)."""
         if self.pts3d is None:
             return {}
         T, J = self.pts3d.shape[0], self.pts3d.shape[1]
@@ -2507,16 +2530,15 @@ class SkeletonCorrector(QMainWindow):
             for j in joints:
                 if 0 <= int(j) < J:
                     jk.setdefault(int(j), set()).add(int(f))
-        # Fallback for edited / single-pin joints: span the global keyframes so
-        # they still interpolate. Joints WITH >=2 precise pins are left on their
-        # own pins (the `< 2` guard) -> stay decoupled / cumulative.
-        glob = [k for k in sorted(self._keyframes) if 0 <= k < T]
-        if len(glob) >= 2:
-            candidates = set(jk) | {int(j) for j in self.edited_joints}
-            for j in candidates:
-                if 0 <= j < J and len(jk.get(j, ())) < 2:
-                    jk.setdefault(j, set()).update(glob)
         return {j: sorted(fs) for j, fs in jk.items() if len(fs) >= 2}
+
+    def _joint_pin_counts(self) -> dict:
+        """joint -> number of distinct frames it is pinned at (authored)."""
+        counts: dict[int, int] = {}
+        for joints in self._kf_joints.values():
+            for j in joints:
+                counts[int(j)] = counts.get(int(j), 0) + 1
+        return counts
 
     def _retrofit_pins(self) -> int:
         """Give old-format progress per-joint pins so it uses the same per-joint
@@ -2540,63 +2562,59 @@ class SkeletonCorrector(QMainWindow):
         if self.pts3d is None:
             return
         method = self.kf_method.currentText()
+        J = self.pts3d.shape[1]
         has_orig = (self.pts3d_orig is not None
                     and self.pts3d_orig.shape == self.pts3d.shape)
         jk = self._build_joint_keyframes()
-        # Per-joint, cumulative interpolation: fill EACH joint only between its
-        # own authored keyframes. Joints you didn't pin (this pass or ever) are
-        # left untouched, and a pinned joint's curve depends only on its own
-        # pins -> fixing the lower body then the upper body no longer disturbs
-        # either one. (Old behaviour recomputed every joint over one global
-        # range with shared knots, so each pass moved already-good joints.)
-        if jk and has_orig:
-            smooth = float(self.kf_smooth.value())
-            mode = "replace" if self.replace_mode_cb.isChecked() else "offset"
-            self._push_undo()
-            out, _rep, _n, sig = interpolate_per_joint(
-                self.pts3d, self.pts3d_orig, jk, method,
-                parents=SMPL24_PARENTS, smooth=smooth, mode=mode)
-            self.pts3d = out
-            self._show_frame()
-            npins = sum(len(fs) for fs in jk.values())
-            mode_desc = ("offset(默认): 保留原始身体运动(下蹲/跳等)+ 叠加你的修正;"
-                         "若某『本来对的』帧被甩飞,在那帧补一个关键帧即可"
-                         if mode == "offset" else
-                         "replace: 关键帧之间走直线穿过你的姿态,丢弃原始运动 ——"
-                         "没标关键帧的运动会被压平(下蹲会变站着),仅修坏数据段时用")
+        # Joints you've touched but that DON'T qualify (only 1 keyframe) — report
+        # them explicitly instead of silently borrowing the global keyframes, so
+        # you know to add a 2nd keyframe.
+        counts = self._joint_pin_counts()
+        touched = set(counts) | {int(j) for j in self.edited_joints}
+        skipped = sorted(j for j in touched if 0 <= j < J and j not in jk)
+        skip_note = ("" if not skipped else
+                     f"\n\n⚠ 未插值(只有 1 个关键帧,需 ≥2): 关节 {skipped}\n"
+                     f"   在另一帧再拖一次这些关节(或加关键帧)即可让它们也连起来。")
+
+        if not jk:
             QMessageBox.information(
-                self, "插值(逐关节·累积)",
-                f"已对 {len(jk)} 个有关键帧的关节,各自在其关键帧之间插值"
-                f"(共 {npins} 个关键点,σ≤{sig:.1f})。\n\n"
-                f"模式:{mode_desc}\n\n"
-                f"逐关节累积:只修改你给该关节标过关键帧的区间;\n"
-                f"这次没碰的关节、以及之前已标好的其它关节都保持不变。")
+                self, "插值",
+                "没有可插值的关节。\n每个关节需要在 ≥2 个关键帧上被拖动过,"
+                "才能在它们之间插值。" + skip_note)
             return
-        # Fallback: no per-joint pins yet (e.g. keyframes set but nothing
-        # edited, or pristine source unavailable) -> old global interpolation.
-        if len(self._keyframes) < 2:
-            QMessageBox.information(self, "插值", "至少需要 2 个关键帧。")
+
+        if not has_orig:
+            # No pristine baseline -> plain interpolation over the global range
+            # for the qualifying joints' span.
+            kfs = sorted(self._keyframes)
+            if len(kfs) >= 2:
+                self._push_undo()
+                self.pts3d[kfs[0]:kfs[-1] + 1] = interpolate_all_joints(
+                    self.pts3d, kfs[0], kfs[-1], method, keyframes=kfs)
+                self._show_frame()
             return
-        kfs = sorted(self._keyframes)
-        fa, fb = kfs[0], kfs[-1]
+
+        smooth = float(self.kf_smooth.value())
+        mode = "replace" if self.replace_mode_cb.isChecked() else "offset"
         self._push_undo()
-        if has_orig:
-            smooth = float(self.kf_smooth.value())
-            res, _rep, _n, sig = interpolate_with_repair(
-                self.pts3d, self.pts3d_orig, fa, fb, method,
-                keyframes=kfs, dragged_joints=set(self.edited_joints),
-                parents=SMPL24_PARENTS, smooth=smooth)
-            mode = f"{method}/相对修正; 软化关键帧 σ={sig:.1f}"
-        else:
-            res = interpolate_all_joints(self.pts3d, fa, fb, method, keyframes=kfs)
-            mode = method
-        self.pts3d[fa:fb + 1] = res
+        out, _rep, _n, sig = interpolate_per_joint(
+            self.pts3d, self.pts3d_orig, jk, method,
+            parents=SMPL24_PARENTS, smooth=smooth, mode=mode)
+        self.pts3d = out
         self._show_frame()
+        npins = sum(len(fs) for fs in jk.values())
+        mode_desc = ("offset(默认): 保留原始身体运动(下蹲/跳等)+ 叠加你的修正;"
+                     "若某『本来对的』帧被甩飞,在那帧补一个关键帧即可"
+                     if mode == "offset" else
+                     "replace: 关键帧之间走直线穿过你的姿态,丢弃原始运动 ——"
+                     "没标关键帧的运动会被压平(下蹲会变站着),仅修坏数据段时用")
         QMessageBox.information(
-            self, "插值",
-            f"已在 skel[{fa}..{fb}] 间按 {len(kfs)} 个关键帧插值。\n{mode}\n\n"
-            f"提示:拖动关节后再插值即可启用「逐关节累积」模式"
-            f"(每个关节只在它自己的关键帧之间插值,互不影响)。")
+            self, "插值(逐关节·累积)",
+            f"已对 {len(jk)} 个关节(各 ≥2 关键帧)在其关键帧之间插值"
+            f"(共 {npins} 个关键点,σ≤{sig:.1f})。\n\n"
+            f"模式:{mode_desc}\n\n"
+            f"逐关节累积:只修改你给该关节标过关键帧的区间;这次没碰的关节、"
+            f"以及之前已标好的其它关节都保持不变。" + skip_note)
 
     # ------------------------------------------------ camera-guided fill
     def _camera_guided_fill(self) -> None:
