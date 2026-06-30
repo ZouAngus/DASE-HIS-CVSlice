@@ -448,15 +448,16 @@ class SkeletonCorrector(QMainWindow):
             ">0 = 在自动基础上再加强;想更贴合手标位置就调小/设很小的值。")
         smooth_row.addWidget(self.kf_smooth, 1)
         kfl.addLayout(smooth_row)
-        self.offset_mode_cb = QCheckBox("保留原始运动细节 (offset)")
-        self.offset_mode_cb.setChecked(False)   # default = replace (stable)
-        self.offset_mode_cb.setToolTip(
-            "默认(不勾)= replace: 关键帧之间画一条干净的曲线『穿过你修正后的关键帧"
-            "姿态』,忽略中间原始动作。最稳,中间帧绝不会被甩飞。\n"
-            "勾上 = offset: 保留中间的原始运动细节,只把关键帧上的修正量平滑地加上去。"
-            "适合关键帧很稀疏的快速往复动作;但若某关节只是『在关键帧那几帧错、中间本来"
-            "是对的』,offset 会把关键帧的大修正也加到那个对的帧上,导致它被甩飞。")
-        kfl.addWidget(self.offset_mode_cb)
+        self.replace_mode_cb = QCheckBox("关键帧间走直线 (replace,丢弃原始运动)")
+        self.replace_mode_cb.setChecked(False)   # default = offset (keeps motion)
+        self.replace_mode_cb.setToolTip(
+            "默认(不勾)= offset: 骨架继续跟随原始身体运动(下蹲/跳/走都保留),"
+            "只把你在关键帧上的修正量平滑地叠加上去。适合绝大多数情况,只要少数几个"
+            "关键帧。(实测下蹲:offset 贴合真实运动 ~2-4% 骨长。)\n"
+            "勾上 = replace: 关键帧之间画直线穿过你的关键帧姿态,丢弃中间原始运动。"
+            "只在『某段源数据是坏的、且你把这段的极值都标了关键帧』时用;它会把你"
+            "没标关键帧的运动压平(比如下蹲会被拉成站着不动,中间帧严重错位)。")
+        kfl.addWidget(self.replace_mode_cb)
         interp_btn = QPushButton("在关键帧间插值 (全关节)")
         interp_btn.setToolTip(
             "先在若干帧上修好骨架并各加一个关键帧,再插值。编辑过的关节用关键帧"
@@ -2537,7 +2538,7 @@ class SkeletonCorrector(QMainWindow):
         # range with shared knots, so each pass moved already-good joints.)
         if jk and has_orig:
             smooth = float(self.kf_smooth.value())
-            mode = "offset" if self.offset_mode_cb.isChecked() else "replace"
+            mode = "replace" if self.replace_mode_cb.isChecked() else "offset"
             self._push_undo()
             out, _rep, _n, sig = interpolate_per_joint(
                 self.pts3d, self.pts3d_orig, jk, method,
@@ -2545,11 +2546,11 @@ class SkeletonCorrector(QMainWindow):
             self.pts3d = out
             self._show_frame()
             npins = sum(len(fs) for fs in jk.values())
-            mode_desc = ("replace(稳): 关键帧之间画干净曲线穿过你修正后的姿态,"
-                         "中间帧不会被甩飞"
-                         if mode == "replace" else
-                         "offset(细节): 保留中间原始运动 + 叠加修正;"
-                         "若中间『本来对的』帧被甩飞,请取消勾选「保留原始运动细节」")
+            mode_desc = ("offset(默认): 保留原始身体运动(下蹲/跳等)+ 叠加你的修正;"
+                         "若某『本来对的』帧被甩飞,在那帧补一个关键帧即可"
+                         if mode == "offset" else
+                         "replace: 关键帧之间走直线穿过你的姿态,丢弃原始运动 ——"
+                         "没标关键帧的运动会被压平(下蹲会变站着),仅修坏数据段时用")
             QMessageBox.information(
                 self, "插值(逐关节·累积)",
                 f"已对 {len(jk)} 个有关键帧的关节,各自在其关键帧之间插值"
