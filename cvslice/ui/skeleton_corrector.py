@@ -393,6 +393,10 @@ class SkeletonCorrector(QMainWindow):
         kfl = QVBoxLayout(kf_g)
         kf_btn_row = QHBoxLayout()
         add_kf_btn = QPushButton("添加关键帧 (K)")
+        add_kf_btn.setToolTip(
+            "把当前帧设为关键帧,并用『当前姿态』锚定你正在修正的关节(无需拖动)。\n"
+            "用法:某关节拖好一次后,在每个『原始姿态已正确』的帧上按 K,就能把它"
+            "钉在那些好帧上 —— 插值会穿过它们。往复动作(跑/摆)多打几个尤其有用。")
         add_kf_btn.clicked.connect(self._add_keyframe)
         kf_btn_row.addWidget(add_kf_btn)
         del_kf_btn = QPushButton("删除")
@@ -2373,22 +2377,47 @@ class SkeletonCorrector(QMainWindow):
             f"现在微调即可;Ctrl+Z 撤销。")
 
     def _add_keyframe(self) -> None:
+        """Add the current frame as a keyframe AND anchor the joints you're
+        correcting there, using their CURRENT pose (no drag needed).
+
+        This is how you mark a good ORIGINAL frame as an anchor: pin the same
+        joints on several good frames so interpolation passes through them —
+        essential for reciprocating motion (run/swing), especially in replace
+        mode. (Accidental clicks still do nothing; only this explicit action
+        anchors.)"""
         if self.pts3d is None:
             return
         pidx = self._v2p(self.cur_frame)
-        if pidx in self._keyframes:
-            self.statusBar().showMessage(f"关键帧 skel {pidx} 已存在")
-            return
+        new_kf = pidx not in self._keyframes
         seeded = ""
-        if self.seed_kf_cb.isChecked() and self._seed_keyframe(pidx):
+        if new_kf and self.seed_kf_cb.isChecked() and self._seed_keyframe(pidx):
             seeded = " (已用插值预填,可直接微调)"
-        self._keyframes.append(pidx)
-        self._keyframes.sort()
+        if new_kf:
+            self._keyframes.append(pidx)
+            self._keyframes.sort()
+        # Anchor every joint under correction at this frame with its current
+        # value (a good original frame -> the source pose; an already-edited
+        # frame -> that pose). Now those joints' interpolation threads through
+        # this frame.
+        anchored = []
+        for j in sorted(self.edited_joints):
+            if 0 <= j < self.pts3d.shape[1] and np.all(np.isfinite(self.pts3d[pidx, j])):
+                self._kf_joints.setdefault(pidx, set()).add(int(j))
+                anchored.append(j)
         self._refresh_kf_list()
-        if seeded:
-            self._show_frame()
-        self.statusBar().showMessage(
-            f"已添加关键帧: skel {pidx} (视频 {self.cur_frame}){seeded}")
+        self._refresh_edited_list()
+        self._show_frame()
+        if anchored:
+            self.statusBar().showMessage(
+                f"关键帧 skel {pidx}:已锚定 {len(anchored)} 个已编辑关节"
+                f"(用当前姿态){seeded} —— 它们的插值会穿过这一帧。")
+        elif new_kf:
+            self.statusBar().showMessage(
+                f"已添加关键帧 skel {pidx}{seeded}。提示:先拖动要修正的关节,"
+                f"再在好帧上按 K,即可把它们锚定到原始姿态(无需再拖)。")
+        else:
+            self.statusBar().showMessage(
+                f"关键帧 skel {pidx} 已存在(当前没有已编辑关节可锚定)。")
 
     def _apply_post_smooth(self) -> None:
         """One-shot post-annotation smoothing on the edited joints: median
