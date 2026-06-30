@@ -2484,15 +2484,19 @@ class SkeletonCorrector(QMainWindow):
             self.slider.setValue(self.cur_frame)
 
     def _build_joint_keyframes(self) -> dict:
-        """Map joint -> sorted authored frames ("pins"). Each joint is filled
-        ONLY between its own pins, so authoring one joint never reshapes another
-        -> corrections accumulate. Joints the user never touched are absent ->
-        left untouched.
+        """Map joint -> sorted authored frames ("pins") to interpolate.
 
-        This is the single interpolation model: there is no global-keyframe
-        fallback. Old-format progress (global keyframes + an edited-joints list
-        but no pins) is retrofitted with pins on load (:meth:`_retrofit_pins`),
-        so old data flows through the exact same per-joint path."""
+        A joint with >=2 precise pins uses ONLY its own pins, so authoring one
+        joint never reshapes another -> corrections accumulate (decoupled).
+
+        BUT any joint you've edited that does NOT yet have >=2 precise pins
+        still gets the global keyframes as knots. This is essential: you
+        normally fix DIFFERENT joints at DIFFERENT keyframes (an arm wrong at
+        kf A, a leg wrong at kf B), so many corrected joints have only ONE pin.
+        Without this, those joints would be dropped and never connect between
+        keyframes ("中间帧没被插帧") — the exact bug this restores. With it, a
+        joint dragged only at A interpolates A(edited)->B(current) across the
+        range. Joints never touched stay absent -> untouched."""
         if self.pts3d is None:
             return {}
         T, J = self.pts3d.shape[0], self.pts3d.shape[1]
@@ -2503,6 +2507,15 @@ class SkeletonCorrector(QMainWindow):
             for j in joints:
                 if 0 <= int(j) < J:
                     jk.setdefault(int(j), set()).add(int(f))
+        # Fallback for edited / single-pin joints: span the global keyframes so
+        # they still interpolate. Joints WITH >=2 precise pins are left on their
+        # own pins (the `< 2` guard) -> stay decoupled / cumulative.
+        glob = [k for k in sorted(self._keyframes) if 0 <= k < T]
+        if len(glob) >= 2:
+            candidates = set(jk) | {int(j) for j in self.edited_joints}
+            for j in candidates:
+                if 0 <= j < J and len(jk.get(j, ())) < 2:
+                    jk.setdefault(j, set()).update(glob)
         return {j: sorted(fs) for j, fs in jk.items() if len(fs) >= 2}
 
     def _retrofit_pins(self) -> int:
