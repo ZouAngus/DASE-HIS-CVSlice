@@ -361,6 +361,11 @@ class SkeletonCorrector(QMainWindow):
         mg.addWidget(h)
         self.sel_joint_lbl = QLabel("选中关节: -")
         mg.addWidget(self.sel_joint_lbl)
+        click_h = QLabel("拖动关节 = 修改位置;点击关节(不拖)= 用当前姿态"
+                         "把它锚定/取消锚定到当前帧(好的原始帧就这样钉)。")
+        click_h.setWordWrap(True)
+        click_h.setStyleSheet("color:#888;")
+        mg.addWidget(click_h)
         self.two_view_cb = QCheckBox("双视角三角化拖拽")
         self.two_view_cb.setToolTip(
             "在上、下视图分别拖同一关节,自动三角化出精确3D(不用猜深度)。"
@@ -1896,7 +1901,48 @@ class SkeletonCorrector(QMainWindow):
             if self.auto_kf_cb.isChecked() and self._auto_add_keyframe():
                 msg += f"  |  已自动添加关键帧 skel {self._v2p(self.cur_frame)}"
             self.statusBar().showMessage(msg)
+        else:
+            # Click WITHOUT drag = anchor this joint at the current frame with
+            # its current pose (no value change). Pin good original frames just
+            # by clicking the joint.
+            self._anchor_joint_here(joint)
         self._show_frame()
+
+    def _anchor_joint_here(self, joint: int) -> None:
+        """TOGGLE one joint's anchor at the current frame (using its CURRENT
+        pose; no value change). Click a joint to pin it here so interpolation
+        passes through this frame; click again to un-pin. On a good original
+        frame, click the joints you want kept — two anchored frames for a joint
+        = it interpolates between them. Toggle keeps stray clicks reversible."""
+        if self.pts3d is None or not (0 <= joint < self.pts3d.shape[1]):
+            return
+        pidx = self._v2p(self.cur_frame)
+        joint = int(joint)
+        here = self._kf_joints.get(pidx, set())
+        if joint in here:                                   # toggle OFF
+            here.discard(joint)
+            if not here:                                    # no joints left here
+                self._kf_joints.pop(pidx, None)
+                if pidx in self._keyframes:
+                    self._keyframes.remove(pidx)
+            self._refresh_kf_list()
+            self._refresh_edited_list()
+            self.statusBar().showMessage(f"已取消锚定关节 {joint} @ skel {pidx}")
+            return
+        if not np.all(np.isfinite(self.pts3d[pidx, joint])):  # toggle ON
+            self.statusBar().showMessage(f"关节 {joint} 在当前帧无效,无法锚定。")
+            return
+        self.edited_joints.add(joint)
+        self._kf_joints.setdefault(pidx, set()).add(joint)
+        if pidx not in self._keyframes:
+            self._keyframes.append(pidx)
+            self._keyframes.sort()
+        self._refresh_kf_list()
+        self._refresh_edited_list()
+        n = self._joint_pin_counts().get(joint, 0)
+        ready = "✓ 可插值" if n >= 2 else "还需在另一帧再锚一次(或拖动)"
+        self.statusBar().showMessage(
+            f"已锚定关节 {joint} @ skel {pidx}(当前姿态) —— 该关节共 {n} 个关键帧,{ready}")
 
     # -------------------------------------------------------------- undo
     def _push_undo(self) -> None:
