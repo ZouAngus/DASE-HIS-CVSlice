@@ -171,7 +171,9 @@ class SkeletonCorrector(QMainWindow):
         self._pose2d_fast = None
 
         # Undo
-        self.undo_stack: list[np.ndarray] = []
+        # Each entry snapshots (pts3d, keyframes, kf_joints, edited_joints) so
+        # undo rolls back the keyframes/pins an edit created, not just poses.
+        self.undo_stack: list = []
 
         self._build_ui()
 
@@ -1918,6 +1920,7 @@ class SkeletonCorrector(QMainWindow):
             return
         pidx = self._v2p(self.cur_frame)
         joint = int(joint)
+        self._push_undo()                     # anchor toggle is undoable
         here = self._kf_joints.get(pidx, set())
         if joint in here:                                   # toggle OFF
             here.discard(joint)
@@ -1952,7 +1955,14 @@ class SkeletonCorrector(QMainWindow):
         # now stale; let auto-save track the full pose again).
         if self._cur_action_idx >= 0:
             self._exported.discard(self._actions[self._cur_action_idx]["tag"])
-        self.undo_stack.append(self.pts3d.copy())
+        # Snapshot the full editable state, not just poses, so undo also removes
+        # the keyframe/pin an edit created (and restores ones a delete removed).
+        self.undo_stack.append((
+            self.pts3d.copy(),
+            list(self._keyframes),
+            {f: set(js) for f, js in self._kf_joints.items()},
+            set(self.edited_joints),
+        ))
         if len(self.undo_stack) > self.UNDO_MAX:
             self.undo_stack.pop(0)
         self._update_undo_lbl()
@@ -1961,10 +1971,16 @@ class SkeletonCorrector(QMainWindow):
         if not self.undo_stack:
             self.statusBar().showMessage("没有可撤销的步骤")
             return
-        self.pts3d = self.undo_stack.pop()
+        pts, kfs, kfj, edited = self.undo_stack.pop()
+        self.pts3d = pts
+        self._keyframes = list(kfs)
+        self._kf_joints = {f: set(js) for f, js in kfj.items()}
+        self.edited_joints = set(edited)
+        self._refresh_kf_list()
+        self._refresh_edited_list()
         self._update_undo_lbl()
         self._show_frame()
-        self.statusBar().showMessage("已撤销")
+        self.statusBar().showMessage("已撤销 (骨骼 + 关键帧/锚点)")
 
     def _update_undo_lbl(self) -> None:
         self.undo_lbl.setText(f"撤销步数: {len(self.undo_stack)}")
@@ -2435,6 +2451,8 @@ class SkeletonCorrector(QMainWindow):
             return
         pidx = self._v2p(self.cur_frame)
         new_kf = pidx not in self._keyframes
+        if new_kf or self.edited_joints:      # something will change -> undoable
+            self._push_undo()
         seeded = ""
         if new_kf and self.seed_kf_cb.isChecked() and self._seed_keyframe(pidx):
             seeded = " (已用插值预填,可直接微调)"
@@ -2527,7 +2545,7 @@ class SkeletonCorrector(QMainWindow):
         knot = np.unique(knot)
         if len(knot) < 2:
             return False
-        self._push_undo()
+        # (Undo is pushed by the caller _add_keyframe before seeding.)
         for j in range(self.pts3d.shape[1]):
             vals = np.array([self.pts3d[int(f), j] for f in knot])
             if not np.all(np.isfinite(vals)):
