@@ -17,11 +17,22 @@
 \usepackage{amsmath}
 \usepackage{pifont}   % \ding crosses in the dataset comparison table
 \usepackage{xcolor}
+% Draft previews contain Chinese \todo notes: build with XeLaTeX, where the
+% todo macro switches to a CJK font (fontspec only, no xeCJK dependency).
+% The final submission (todos removed via \todosfalse) compiles with the
+% official pdflatex-based 3DV kit as-is.
+\usepackage{iftex}
+\ifXeTeX
+  \usepackage{fontspec}
+  \newfontfamily\todocjkfont{Noto Serif CJK SC}
+\else
+  \newcommand{\todocjkfont}{}
+\fi
 \usepackage[pagebackref,breaklinks,colorlinks,citecolor=blue]{hyperref}
 
 % ---- draft machinery ----------------------------------------------------
 \newif\iftodos \todostrue   % \todosfalse hides all TODO markers
-\newcommand{\todo}[1]{\iftodos\textcolor{red}{\textbf{[TODO: #1]}}\fi}
+\newcommand{\todo}[1]{\iftodos\textcolor{red}{\textbf{[TODO: {\todocjkfont #1}]}}\fi}
 \newcommand{\DATASET}{CAVE-HAR\todo{数据集正式命名待定 (G1)}}
 \newcommand{\numclips}{\todo{清洗后片段总数 (G8)}}
 
@@ -112,15 +123,21 @@ motion-capture cameras and 7 RGB cameras. Our contributions are:
 % =========================================================================
 \section{Related Work}
 \paragraph{HAR datasets.}
-NTU~RGB+D~\cite{shahroudy2016ntu} and NTU~RGB+D~120~\cite{liu2020ntu120}
-established the dominant evaluation setting: 106 subjects, 120 classes,
-Kinect-estimated skeletons, frontal/side views. ANUBIS~\cite{yu2022anubis}
-added rear viewpoints and finer-grained interactions with Azure-Kinect
-skeletons. Kinetics~\cite{kay2017kinetics} scales to web video without 3D
-ground truth. All estimate skeletons from consumer depth sensors or 2D
-pose; none offers optical-mocap-grade joints, top-mounted views, or
-projected-background variation. Our comparison appears in
-Table~\ref{tab:datasets}.
+Existing corpora split into two families with an inherent
+scale--fidelity trade-off. The \emph{scale} family---NTU~RGB+D
+\cite{shahroudy2016ntu}, NTU~RGB+D~120~\cite{liu2020ntu120},
+ANUBIS~\cite{yu2022anubis}, Kinetics~\cite{kay2017kinetics}---recruits
+large cohorts but estimates skeletons from consumer depth sensors or 2D
+pose, with joint errors on the order of centimeters and frequent tracking
+failure under occlusion. The \emph{fidelity} family anchors joints with
+optical motion capture and has always traded cohort size for precision:
+Human3.6M~\cite{ionescu2014h36m} records 11 actors with 4 cameras,
+TotalCapture~\cite{trumble2017totalcapture} 5 actors with 8 cameras.
+\DATASET{} belongs to the fidelity family---240\,Hz optical mocap refined
+by MoSh++ and manual verification---while providing the largest actor
+cohort in that family, the most action classes, and conditions none of
+them cover: top-mounted viewpoints, prop-based VR interaction, and
+controlled background shift (Table~\ref{tab:datasets}).
 
 \paragraph{User behavior corpora in VR.}
 LocoVR~\cite{takeyama2024locovr} records multi-user locomotion trajectories
@@ -207,17 +224,26 @@ raising hand & cut \\
 \end{table}
 
 \begin{table*}[t]\centering\small
-\caption{Comparison with existing HAR and VR-behavior datasets.
-\todo{逐格核对数字并补齐空格 (G7)}}
+\caption{Comparison with representative HAR and motion-capture datasets.
+Estimated-skeleton corpora (top) scale in subjects but provide noisy
+joints; mocap-grade corpora (bottom) trade cohort size for precision.
+\DATASET{} offers the largest cohort and action vocabulary in the
+mocap-grade family, with capture conditions unavailable elsewhere.
+\todo{逐格终核数字 (G7)}}
 \label{tab:datasets}
-\begin{tabular}{@{}lcccccc@{}}
+\begin{tabular}{@{}lcccccccc@{}}
 \toprule
-Dataset & Subjects & Classes & Clips & Skeleton source & Top-mounted views & Controlled background shift \\
+Dataset & Subjects & Classes & Skeleton GT (rate) & Calib.\ RGB views &
+Top-mounted & Props/VR interact. & Ctrl.\ bg shift & Verified GT \\
 \midrule
-NTU RGB+D 120~\cite{liu2020ntu120} & 106 & 120 & 114{,}480 & Kinect v2 & \ding{55} & \ding{55} \\
-ANUBIS~\cite{yu2022anubis} & 80 & 102 & 66{,}232 & Azure Kinect & \ding{55} & \ding{55} \\
-LocoVR~\cite{takeyama2024locovr} & \todo{} & locomotion & \todo{} & HMD tracking & \ding{55} & \ding{55} \\
-\DATASET{} (ours) & 15 & 18 & \numclips & optical mocap + MoSh++ & \checkmark & \checkmark \\
+\multicolumn{9}{@{}l}{\emph{Estimated skeletons (scale family)}} \\
+NTU RGB+D 120~\cite{liu2020ntu120} & 106 & 120 & Kinect v2 (30\,Hz) & 3 viewpoints & \ding{55} & \ding{55} & \ding{55} & \ding{55} \\
+ANUBIS~\cite{yu2022anubis} & 80 & 102 & Azure Kinect (30\,Hz) & \ding{55} & \ding{55} & \ding{55} & \ding{55} & \ding{55} \\
+\midrule
+\multicolumn{9}{@{}l}{\emph{Mocap-grade skeletons (fidelity family)}} \\
+Human3.6M~\cite{ionescu2014h36m} & 11 & 17 scen. & optical mocap (50\,Hz) & 4 & \ding{55} & \ding{55} & \ding{55} & \ding{55} \\
+TotalCapture~\cite{trumble2017totalcapture} & 5 & 5 acts & Vicon+IMU (60\,Hz) & 8 & \ding{55} & \ding{55} & \ding{55} & \ding{55} \\
+\DATASET{} (ours) & 15 & 18 & optical mocap (240\,Hz) + MoSh++ & 7 & \checkmark & \checkmark & \checkmark & \checkmark \\
 \bottomrule
 \end{tabular}
 \end{table*}
@@ -250,7 +276,35 @@ test-split clips are fully verified; training-split clips are corrected
 worst-first by quality score with per-frame edit masks released
 (\todo{银标准修正比例 (G9)}). Corrections modified \todo{X\% (G9)} of
 test-split frames; dual-annotation of a 5\% sample shows mean joint
-disagreement of \todo{Y mm (G10)}.
+disagreement of \todo{Y mm (G10)}. Fig.~\todo{标注工具界面图: 双视角+极线
++IK黄圈, 一图讲清方法论 (G22)} illustrates the tool; the full correction
+SOP, marker layout, and capture protocol appear in the supplementary
+material, and the toolchain itself is released so that others can extend
+the corpus at the same quality bar.
+
+\subsection{Quantifying the CAVE gap}
+\label{sec:gap}
+To turn the three violated assumptions of \S1 into measurements, we
+characterize the corpus along three axes; all quantities are computed
+directly from the released calibration and ground truth.
+\paragraph{Viewpoint geometry.}
+From the camera extrinsics we report the distribution of camera pitch
+angles relative to the subject's pelvis across all frames: the top-mounted
+row observes actors at \todo{中位俯仰角/范围, 由外参+骨架直接算 (G19)},
+versus the near-horizontal geometry of tripod-based corpora.
+\paragraph{Interaction-driven self-occlusion.}
+Projecting the mocap ground truth into each view and testing body
+self-occlusion \todo{遮挡判定方法一句话 (G20)}, wrists are occluded in
+\todo{X\% (G20)} of interaction-action frames in top-mounted views versus
+\todo{Y\% (G20)} in the low-rim views---occlusion statistics that
+ground-truth-free datasets cannot even measure.
+\paragraph{Projected-background variation.}
+Because the CAVE walls are displays, scene changes shift the entire
+background and spill colored light onto the actor. We quantify this as the
+inter-scene distance of background color statistics and the intra-actor
+appearance drift across scenes (\todo{LAB 直方图距离等具体度量与数字
+(G21)}), an order of magnitude \todo{核实后措辞 (G21)} beyond the
+illumination variation of laboratory corpora.
 
 \subsection{Statistics}
 \todo{最终统计表: 每类样本数/时长分布/marker 丢失率/QC 分布直方图,
@@ -313,7 +367,19 @@ PoseConv3D~\cite{duan2022poseconv3d}   & Skel.+RGB & \todo{} & \todo{} & \todo{}
 \end{table}
 
 \paragraph{Cross-domain gap.} \todo{NTU 预训练 zero-shot/finetune 表 (G13)}
-\paragraph{Viewpoint analysis.} \todo{逐相机准确率 + 遮挡消融 (G13)}
+\paragraph{Viewpoint analysis.} Per-camera accuracy correlated with the
+pitch-angle and occlusion statistics of \S\ref{sec:gap}.
+\todo{逐相机准确率 + 遮挡消融 (G13)}
+\paragraph{Per-class analysis.} Confusion between general and
+VR-interaction classes; which interaction actions are separable from
+skeleton alone versus requiring RGB (prop visibility).
+\todo{混淆矩阵与讨论 (G13)}
+\paragraph{Does ground-truth quality matter?}
+Training the strongest skeleton baseline on raw MoSh++ output versus
+verified skeletons isolates the value of manual correction
+(\todo{原始 vs 修正 GT 消融, 训练两次即可, 低成本高说服力 (G23)})---an
+ablation that also serves practitioners deciding whether correction effort
+is worthwhile.
 \paragraph{Zero-shot recognition.} \todo{ActionCLIP 零样本结果 (G13)}
 \paragraph{Latency.} \todo{accuracy-latency 曲线与讨论 (G13, G15)}
 \paragraph{Qualitative results.} \todo{成功/失败案例可视化 (G16)}
