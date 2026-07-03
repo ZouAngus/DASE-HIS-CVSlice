@@ -1,4 +1,4 @@
-# benchmark/ — CAVE-HAR 论文与基准的权威文档目录
+# benchmark/ — CAVEAT 论文与基准的权威文档目录
 
 论文相关的决议、规范、规划**只放这里**，跟随 git 版本管理，push 后全组可见。
 改动这里的"权威定义类"文件（joints / split）前先看文件内的变更控制说明。

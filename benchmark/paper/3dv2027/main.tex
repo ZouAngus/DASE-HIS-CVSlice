@@ -1,5 +1,5 @@
 % =========================================================================
-% CAVE-HAR — 3DV 2027 draft (target deadline: Aug 28, 2026 AoE)
+% CAVEAT — 3DV 2027 draft (target deadline: Aug 28, 2026 AoE)
 % -------------------------------------------------------------------------
 % NOTE: 3DV uses the CVF-style two-column format. Before submission,
 % replace this preamble with the official 3DV 2027 author kit (expected on
@@ -33,7 +33,7 @@
 % ---- draft machinery ----------------------------------------------------
 \newif\iftodos \todostrue   % \todosfalse hides all TODO markers
 \newcommand{\todo}[1]{\iftodos\textcolor{red}{\textbf{[TODO: {\todocjkfont #1}]}}\fi}
-\newcommand{\DATASET}{CAVE-HAR\todo{数据集正式命名待定 (G1)}}
+\newcommand{\DATASET}{CAVEAT}
 \newcommand{\numclips}{\todo{清洗后片段总数 (G8)}}
 
 \begin{document}
@@ -94,7 +94,7 @@ clips without latency constraints, whereas interactive VR imposes tight
 motion-to-response budgets. The gap between these assumptions and CAVE
 reality is unquantified because no suitable benchmark exists.
 
-We close this gap with \DATASET{}, captured in a
+We close this gap with \DATASET{}\footnote{\DATASET{} = \textbf{CAVE} \textbf{A}c\textbf{T}ions --- also, we hope, a literal \emph{caveat} for action recognition models benchmarked only in conventional laboratories.}, captured in a
 \todo{CAVE 尺寸/面数确认: 幻灯片同时出现 ``5 faces active'' 与 ``6-sided''
 (G2)} projection CAVE instrumented with 12 OptiTrack Prime$^{\mathrm{x}}$13
 motion-capture cameras and 7 RGB cameras. Our contributions are:

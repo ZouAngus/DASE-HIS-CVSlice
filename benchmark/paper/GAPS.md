@@ -7,7 +7,7 @@
 
 | # | 缺口 | 负责 | 来源/动作 |
 |---|------|------|-----------|
-| G1 | 数据集正式命名（\DATASET 宏一处改全篇） | Angus + 导师 | 组会定名 |
+| G1 | ~~数据集正式命名~~ ✅ 已定 **CAVEAT**（= CAVE AcTions，2026-07-03） | — | 已在 main.tex 落名 |
 | G2 | CAVE 面数口径（幻灯片同时有 "5 faces active" 与 "6-sided"）+ 尺寸 | Angus | 实地确认 |
 | G5 | Round 1 mocap 相机数：幻灯片正文 7 台 vs 汇总表 8 台 | Angus | 查采集记录 |
 | G17 | 伦理批号（投稿系统必填）+ 面部是否模糊的最终决定 | Angus | consent_check.md 关闭后 |

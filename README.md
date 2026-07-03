@@ -2,7 +2,7 @@
 
 Multi-view action clip annotator & exporter for motion capture data.
 
-CVSlice 是 CAVE-HAR 数据集的时间同步标注与裁切工具。它的核心任务是：将 OptiTrack 动作捕捉系统录制的 3D 骨骼数据（240 FPS）与多视角 RGB 视频（30 FPS）进行时间对齐，并按动作片段裁切导出。
+CVSlice 是 CAVEAT 数据集的时间同步标注与裁切工具。它的核心任务是：将 OptiTrack 动作捕捉系统录制的 3D 骨骼数据（240 FPS）与多视角 RGB 视频（30 FPS）进行时间对齐，并按动作片段裁切导出。
 
 ---
 

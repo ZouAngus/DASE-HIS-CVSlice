@@ -1,4 +1,4 @@
-# CAVE-HAR 官方关节集定义 (SMPL-22) — v1
+# CAVEAT 官方关节集定义 (SMPL-22) — v1
 
 > 决议日期：2026-07-03。适用范围：benchmark 全部发布数据、评测协议、三个 baseline 组的 dataloader。
 > 数据源：MoSh++ 拟合的 SMPL 关节位置（原始输出 24 关节，发布与评测仅用前 22 个）。
