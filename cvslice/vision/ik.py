@@ -221,3 +221,79 @@ def sample_circle(center: np.ndarray, radius: float, axis: np.ndarray,
     return (center[None, :]
             + radius * (np.cos(ang)[:, None] * u[None, :]
                         + np.sin(ang)[:, None] * v[None, :]))
+
+
+# ------------------------------------------------------------- extensions
+# Beyond the two-bone chains, every remaining joint gets a defined physical
+# behaviour in IK mode (SMPL-22/24 topologies only; H36M-17 keeps chains only):
+#
+#   sphere joints — orient-only: the joint slides on a sphere around its
+#       parent, bone length locked (hands around wrists, feet around ankles,
+#       head around neck);
+#   subtree roots — rigid translate: the joint and all its descendants move
+#       by one delta (pelvis = whole body; spines / neck / collars = upper
+#       sections, e.g. a collar carries the shoulder + whole arm).
+#
+# SMPL kinematic tree (kept local so this module stays dependency-free).
+SMPL24_PARENT = (-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8,
+                 9, 9, 9, 12, 13, 14, 16, 17, 18, 19, 20, 21)
+
+_SPHERE_24 = {22: 20, 23: 21, 10: 7, 11: 8, 15: 12}
+_SUBTREE_ROOTS_24 = (0, 3, 6, 9, 12, 13, 14)
+
+
+def sphere_map(num_joints: int) -> dict[int, int]:
+    """joint -> parent for orient-only sphere drags (empty if unsupported)."""
+    if num_joints not in (22, 24):
+        return {}
+    return {j: p for j, p in _SPHERE_24.items()
+            if j < num_joints and p < num_joints}
+
+
+def subtree_roots(num_joints: int) -> set[int]:
+    """Joints whose IK drag rigidly translates their whole subtree."""
+    if num_joints not in (22, 24):
+        return set()
+    return {j for j in _SUBTREE_ROOTS_24 if j < num_joints}
+
+
+def subtree_joints(num_joints: int, root: int) -> list[int]:
+    """``root`` plus all its descendants in the SMPL tree (within J)."""
+    if num_joints not in (22, 24):
+        return [root]
+    children: dict[int, list[int]] = {}
+    for j in range(num_joints):
+        p = SMPL24_PARENT[j]
+        if p >= 0:
+            children.setdefault(p, []).append(j)
+    out, stack = [], [root]
+    while stack:
+        j = stack.pop()
+        out.append(j)
+        stack.extend(children.get(j, []))
+    return sorted(out)
+
+
+def orient_on_sphere(center: np.ndarray, radius: float,
+                     drag_pt: np.ndarray) -> np.ndarray | None:
+    """Slide a point onto the sphere (center, radius), toward ``drag_pt``.
+
+    Returns None when the drag point coincides with the center (direction
+    undefined) — the caller refuses instead of guessing.
+    """
+    d = np.asarray(drag_pt, float) - np.asarray(center, float)
+    dist = float(np.linalg.norm(d))
+    if dist < _EPS:
+        return None
+    return np.asarray(center, float) + radius * (d / dist)
+
+
+def reference_pair_length(pts3d: np.ndarray, a: int, b: int,
+                          min_frames: int = 3) -> float | None:
+    """Median finite length of bone a->b over the clip (None if too few)."""
+    pa, pb = pts3d[:, a], pts3d[:, b]
+    ok = np.isfinite(pa).all(1) & np.isfinite(pb).all(1)
+    if ok.sum() < min_frames:
+        return None
+    val = float(np.median(np.linalg.norm(pb[ok] - pa[ok], axis=1)))
+    return val if val > _EPS else None

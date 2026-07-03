@@ -164,3 +164,36 @@ def test_root_map_for_rigid_limb_translation():
     r17 = ik.root_map(17)
     assert set(r17) == {11, 14, 1, 4}
     assert ik.root_map(37) == {}
+
+
+# ------------------------------------------------- sphere / subtree behaviour
+def test_orient_on_sphere_locks_radius_and_follows_direction():
+    center = np.array([1.0, 1.0, 1.0])
+    p = ik.orient_on_sphere(center, 0.2, center + np.array([0.0, 9.0, 0.0]))
+    assert p == pytest.approx(center + np.array([0.0, 0.2, 0.0]), abs=1e-9)
+    assert ik.orient_on_sphere(center, 0.2, center.copy()) is None
+
+
+def test_sphere_map_and_subtree_roots_by_topology():
+    assert ik.sphere_map(24) == {22: 20, 23: 21, 10: 7, 11: 8, 15: 12}
+    assert ik.sphere_map(22) == {10: 7, 11: 8, 15: 12}   # no hands in 22
+    assert ik.sphere_map(17) == {}
+    assert ik.subtree_roots(24) == {0, 3, 6, 9, 12, 13, 14}
+    assert ik.subtree_roots(17) == set()
+
+
+def test_subtree_joints_pelvis_is_whole_body_and_collar_is_arm():
+    assert ik.subtree_joints(24, 0) == list(range(24))
+    assert ik.subtree_joints(24, 13) == [13, 16, 18, 20, 22]  # collar -> arm
+    assert ik.subtree_joints(24, 12) == [12, 15]              # neck -> head
+    assert ik.subtree_joints(22, 13) == [13, 16, 18, 20]      # no hand in 22
+
+
+def test_reference_pair_length_median_and_refusal():
+    pts = np.zeros((10, 24, 3))
+    pts[:, 12] = np.array([0.0, 0.0, 0.0])
+    pts[:, 15] = np.array([0.0, 0.15, 0.0])
+    pts[4, 15] = np.nan
+    assert ik.reference_pair_length(pts, 12, 15) == pytest.approx(0.15)
+    bad = np.full((10, 24, 3), np.nan)
+    assert ik.reference_pair_length(bad, 12, 15) is None

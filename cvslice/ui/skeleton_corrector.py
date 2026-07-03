@@ -2003,7 +2003,72 @@ class SkeletonCorrector(QMainWindow):
         chain = ik.root_map(J).get(joint)
         if chain is not None:
             return self._ik_move_root(pidx, chain, target)
-        return None                     # torso/head/hand/foot -> normal drag
+        parent = ik.sphere_map(J).get(joint)
+        if parent is not None:
+            return self._ik_move_sphere(pidx, joint, parent, target)
+        if joint in ik.subtree_roots(J):
+            return self._ik_move_subtree(pidx, joint, target)
+        return None                     # unsupported topology -> normal drag
+
+    def _ik_move_sphere(self, pidx: int, joint: int, parent: int,
+                        target: np.ndarray) -> set[int]:
+        """Hand/foot/head drag in IK mode: orient-only. The joint slides on a
+        sphere around its parent (wrist/ankle/neck), bone length locked to the
+        per-clip median."""
+        P = self.pts3d
+        center = P[pidx, parent]
+        if not np.all(np.isfinite(center)):
+            self.statusBar().showMessage(
+                f"IK: 父关节 {parent} 本帧无效,无法球面调整。")
+            return set()
+        key = (parent, -1, joint)                     # pair-length cache slot
+        r = self._ik_len_cache.get(key)
+        if r is None:
+            val = ik.reference_pair_length(P, parent, joint)
+            if val is None:
+                self.statusBar().showMessage(
+                    f"IK: 骨长 {parent}→{joint} 无法估计(有效帧太少),"
+                    "请改用普通拖动。")
+                return set()
+            r = (val, val)
+            self._ik_len_cache[key] = r
+        new_p = ik.orient_on_sphere(center, r[0], target)
+        if new_p is None:
+            self.statusBar().showMessage(
+                "IK: 拖动位置与父关节重合,方向不确定,请向外拖。")
+            return set()
+        if not self._undo_pushed_for_drag:
+            self._push_undo()
+            self._undo_pushed_for_drag = True
+        P[pidx, joint] = new_p
+        self.statusBar().showMessage(
+            f"IK: 关节 {joint} 绕关节 {parent} 球面调整(骨长锁定,只调朝向)")
+        return {joint}
+
+    def _ik_move_subtree(self, pidx: int, joint: int,
+                         target: np.ndarray) -> set[int]:
+        """Pelvis/spine/neck/collar drag in IK mode: rigid translation of the
+        joint plus ALL its descendants (pelvis = the whole skeleton), so no
+        bone inside the moved section changes length."""
+        P = self.pts3d
+        old = P[pidx, joint]
+        if not np.all(np.isfinite(old)):
+            self.statusBar().showMessage(
+                f"IK: 关节 {joint} 本帧无效,无法平移。")
+            return set()
+        delta = np.asarray(target, float) - old
+        if not self._undo_pushed_for_drag:
+            self._push_undo()
+            self._undo_pushed_for_drag = True
+        moved: set[int] = set()
+        for j in ik.subtree_joints(P.shape[1], joint):
+            if np.all(np.isfinite(P[pidx, j])):
+                P[pidx, j] = P[pidx, j] + delta
+                moved.add(j)
+        label = ("整个骨架" if joint == 0
+                 else f"关节 {joint} 及其子树({len(moved)} 关节)")
+        self.statusBar().showMessage(f"IK: {label}刚性平移")
+        return moved
 
     def _ik_move_root(self, pidx: int, chain: ik.LimbChain,
                       target: np.ndarray) -> set[int]:
