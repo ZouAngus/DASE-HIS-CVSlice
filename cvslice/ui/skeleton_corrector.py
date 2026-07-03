@@ -50,7 +50,7 @@ from cvslice.vision.adjustment import (
     compute_ray, extract_R_t, find_nearest_joint, get_camera_depth,
     triangulate_two_rays, unproject_2d_to_3d,
 )
-from cvslice.vision import camera_guided, multiview, pose2d
+from cvslice.vision import camera_guided, ik, multiview, pose2d
 from cvslice.vision.projection import (
     clear_projection_cache, draw_skel_with_confidence, project_pts,
 )
@@ -151,6 +151,11 @@ class SkeletonCorrector(QMainWindow):
         # Two-view triangulated drag: per-joint 2D placement in each side at the
         # current skeleton frame -> {joint: {"T": (x,y), "B": (x,y), "pidx": n}}
         self._tv2d: dict[int, dict] = {}
+        # IK drag mode: per-chain locked bone lengths (median over the clip),
+        # cleared whenever a different skeleton is loaded. Overlay state is the
+        # chain being solved during an active IK drag (for the yellow guide).
+        self._ik_len_cache: dict[tuple[int, int, int], tuple[float, float]] = {}
+        self._ik_overlay: dict | None = None
 
         # Edit mode
         self._selected_joint: int | None = None
@@ -378,6 +383,22 @@ class SkeletonCorrector(QMainWindow):
         tv_h.setWordWrap(True)
         tv_h.setStyleSheet("color:#888;")
         mg.addWidget(tv_h)
+        self.ik_cb = QCheckBox("🦾 IK 拖动 (I): 拖腕/踝带整肢, 骨长锁定")
+        self.ik_cb.setToolTip(
+            "两骨 IK 模式,规则固定无歧义:\n"
+            "• 拖 腕/踝 → 肩/髋不动,肘/膝自动落位;上臂/前臂骨长锁定为"
+            "本片段中位数;手/脚随腕/踝刚性跟随。\n"
+            "• 目标超出可及范围 → 肢体完全伸直,末端钳到最大伸展处 —— "
+            "直臂绝不会被折弯。\n"
+            "• 拖 肘/膝 → 腕/踝不动,肘/膝只在骨长允许的圆弧(黄圈)上滑动,"
+            "即调摆动平面;完全伸直时无圆弧,会提示先拖腕。\n"
+            "• 其余关节(肩/髋/躯干/头/手/脚)不受影响,仍是普通拖动。\n"
+            "• 与『双视角三角化拖拽』兼容:目标点按原逻辑取得后再做 IK。")
+        self.ik_cb.toggled.connect(
+            lambda on: self.statusBar().showMessage(
+                "IK 拖动已开启: 拖腕/踝=整肢求解, 拖肘/膝=圆弧调摆向"
+                if on else "IK 拖动已关闭: 恢复普通单关节拖动"))
+        mg.addWidget(self.ik_cb)
         rp.addWidget(mode_g)
 
         ej_g = QGroupBox("已编辑关节 / 关键帧数")
@@ -1054,6 +1075,8 @@ class SkeletonCorrector(QMainWindow):
         self._keyframes.clear()
         self._kf_joints.clear()
         self._tv2d.clear()
+        self._ik_len_cache.clear()       # bone lengths are per-clip
+        self._ik_overlay = None
         self._selected_joint = None
         self.sel_joint_lbl.setText("选中关节: -")
 
@@ -1609,6 +1632,25 @@ class SkeletonCorrector(QMainWindow):
                         and self._drag_joint < len(proj)):
                     jx, jy = int(proj[self._drag_joint][0]), int(proj[self._drag_joint][1])
                     cv2.circle(frm, (jx, jy), 11, (0, 255, 0), 2)
+                # IK drag guide: yellow chain (root->mid->effector), plus the
+                # swivel circle while dragging an elbow/knee.
+                if self._ik_overlay is not None:
+                    ch = self._ik_overlay["chain"]
+                    ids = [ch.root, ch.mid, ch.eff]
+                    if all(i < len(proj) for i in ids):
+                        seg = np.asarray([proj[i][:2] for i in ids])
+                        if np.all(np.isfinite(seg)):
+                            cv2.polylines(frm, [seg.astype(np.int32)], False,
+                                          (0, 255, 255), 2, cv2.LINE_AA)
+                    circ3d = self._ik_overlay.get("circle")
+                    if circ3d is not None:
+                        cp = project_pts(circ3d, intr, extr,
+                                         False, False, False)
+                        if cp is not None:
+                            cp = np.asarray(cp)[:, :2]
+                            if np.all(np.isfinite(cp)):
+                                cv2.polylines(frm, [cp.astype(np.int32)], True,
+                                              (0, 255, 255), 1, cv2.LINE_AA)
                 if side == "T":
                     self._proj_L = proj
                 else:
@@ -1874,16 +1916,29 @@ class SkeletonCorrector(QMainWindow):
                     new_p = triangulate_two_rays(o1, dir1, o2, dir2)
         if new_p is None:
             new_p = unproject_2d_to_3d(x, y, self._drag_z, K, R, t, dist)
-        # First actual movement of this drag: NOW push undo + count it as an
-        # edit (so a no-move click leaves no keyframe/pin/undo entry).
-        if not self._undo_pushed_for_drag:
-            self._push_undo()
-            self._undo_pushed_for_drag = True
-        self.pts3d[pidx, joint] = new_p
-        self.edited_joints.add(joint)
-        # Pin this joint at this frame: it's now user-authored ground truth.
+        moved: set[int] | None = None
+        if self.ik_cb.isChecked():
+            r = self._ik_move(pidx, joint, new_p)
+            if r is not None:
+                if not r:
+                    # IK applies to this joint but the solve was refused (a
+                    # status message says why). Do NOT fall through to a free
+                    # drag — that would silently break bone lengths.
+                    return
+                moved = r
+        if moved is None:
+            # Normal free drag (IK off, or joint outside any IK chain).
+            # First actual movement of this drag: NOW push undo + count it as
+            # an edit (so a no-move click leaves no keyframe/pin/undo entry).
+            if not self._undo_pushed_for_drag:
+                self._push_undo()
+                self._undo_pushed_for_drag = True
+            self.pts3d[pidx, joint] = new_p
+            moved = {joint}
+        self.edited_joints.update(moved)
+        # Pin the authored joints at this frame: they're now user ground truth.
         # Per-joint interpolation fills only between a joint's own pins.
-        self._kf_joints.setdefault(pidx, set()).add(joint)
+        self._kf_joints.setdefault(pidx, set()).update(moved)
         self._show_frame()
 
     def _on_release(self, side: str, x: int, y: int) -> None:
@@ -1896,6 +1951,7 @@ class SkeletonCorrector(QMainWindow):
         self._drag_joint = None
         self._drag_z = None
         self._undo_pushed_for_drag = False
+        self._ik_overlay = None          # drop the yellow IK guide overlay
         if was_drag:
             self._refresh_edited_list()
             self._update_undo_lbl()
@@ -1909,6 +1965,123 @@ class SkeletonCorrector(QMainWindow):
             # by clicking the joint.
             self._anchor_joint_here(joint)
         self._show_frame()
+
+    # ------------------------------------------------------------- IK drag
+    def _ik_lengths(self, chain: ik.LimbChain) -> tuple[float, float] | None:
+        """Locked bone lengths for a chain (median over this clip), cached."""
+        key = (chain.root, chain.mid, chain.eff)
+        got = self._ik_len_cache.get(key)
+        if got is None:
+            got = ik.reference_lengths(self.pts3d, chain)
+            if got is not None:
+                self._ik_len_cache[key] = got
+        return got
+
+    def _ik_move(self, pidx: int, joint: int,
+                 target: np.ndarray) -> set[int] | None:
+        """IK-mode drag dispatch.
+
+        Returns the set of joints moved; an EMPTY set when the drag is refused
+        (status message says why, nothing changed); or None when IK does not
+        apply to this joint (caller falls back to the normal free drag).
+        """
+        J = self.pts3d.shape[1]
+        eff_map, mid_map = ik.chain_maps(J)
+        if not eff_map:
+            self.statusBar().showMessage(
+                f"IK: 当前骨架 ({J} 点) 不支持 IK,已按普通拖动处理。")
+            return None
+        chain = eff_map.get(joint)
+        if chain is not None:
+            return self._ik_move_effector(pidx, chain, target)
+        chain = mid_map.get(joint)
+        if chain is not None:
+            return self._ik_move_mid(pidx, chain, target)
+        return None                     # torso/head/hand/foot -> normal drag
+
+    def _ik_move_effector(self, pidx: int, chain: ik.LimbChain,
+                          target: np.ndarray) -> set[int]:
+        P = self.pts3d
+        root = P[pidx, chain.root]
+        if not np.all(np.isfinite(root)):
+            self.statusBar().showMessage(
+                f"IK: {chain.name}根部(关节 {chain.root})本帧无效,无法求解;"
+                "可先用普通拖动修根部。")
+            return set()
+        ref = self._ik_lengths(chain)
+        if ref is None:
+            self.statusBar().showMessage(
+                f"IK: {chain.name}骨长无法估计(本片段有效帧太少),"
+                "请改用普通拖动。")
+            return set()
+        l1, l2 = ref
+        prev_mid = P[pidx - 1, chain.mid] if pidx > 0 else None
+        res = ik.solve_effector(root, target, l1, l2,
+                                P[pidx, chain.mid], prev_mid)
+        if res is None:
+            self.statusBar().showMessage(
+                f"IK: 目标与{chain.name}根部重合,无法求解。")
+            return set()
+        mid, eff, clamped = res
+        if not self._undo_pushed_for_drag:
+            self._push_undo()
+            self._undo_pushed_for_drag = True
+        moved = {chain.mid, chain.eff}
+        # Hand/foot rides rigidly with the effector (delta of the effector).
+        if chain.rider is not None and chain.rider < P.shape[1]:
+            old_eff = P[pidx, chain.eff]
+            rider = P[pidx, chain.rider]
+            if np.all(np.isfinite(rider)) and np.all(np.isfinite(old_eff)):
+                P[pidx, chain.rider] = rider + (eff - old_eff)
+                moved.add(chain.rider)
+        P[pidx, chain.mid] = mid
+        P[pidx, chain.eff] = eff
+        self._ik_overlay = {"chain": chain, "circle": None}
+        self.statusBar().showMessage(
+            f"IK: {chain.name}已求解(骨长锁定)"
+            + ("  |  超出可及范围 → 完全伸直并钳制" if clamped else ""))
+        return moved
+
+    def _ik_move_mid(self, pidx: int, chain: ik.LimbChain,
+                     target: np.ndarray) -> set[int]:
+        P = self.pts3d
+        root, eff = P[pidx, chain.root], P[pidx, chain.eff]
+        if not (np.all(np.isfinite(root)) and np.all(np.isfinite(eff))):
+            self.statusBar().showMessage(
+                f"IK: {chain.name}的根部或末端本帧无效,无法调摆向。")
+            return set()
+        ref = self._ik_lengths(chain)
+        if ref is None:
+            self.statusBar().showMessage(
+                f"IK: {chain.name}骨长无法估计(本片段有效帧太少),"
+                "请改用普通拖动。")
+            return set()
+        l1, l2 = ref
+        new_mid = ik.solve_swivel(root, eff, l1, l2, target)
+        if new_mid is None:
+            d = float(np.linalg.norm(eff - root))
+            if d >= l1 + l2 - 1e-9:
+                msg = (f"IK: {chain.name}已完全伸直,无摆向可调 —— "
+                       "先拖动末端(腕/踝)。")
+            elif d <= abs(l1 - l2) + 1e-9:
+                msg = (f"IK: {chain.name}末端离根部过近,无有效圆弧 —— "
+                       "先拖动末端(腕/踝)。")
+            else:
+                msg = "IK: 拖动位置在肢体轴线上,摆向不确定,请向侧面拖。"
+            self.statusBar().showMessage(msg)
+            return set()
+        if not self._undo_pushed_for_drag:
+            self._push_undo()
+            self._undo_pushed_for_drag = True
+        P[pidx, chain.mid] = new_mid
+        circ = ik.swivel_circle(root, eff, l1, l2)
+        self._ik_overlay = {
+            "chain": chain,
+            "circle": (ik.sample_circle(*circ) if circ is not None else None),
+        }
+        self.statusBar().showMessage(
+            f"IK: {chain.name}摆向已调整(末端与根部不动,骨长锁定)")
+        return {chain.mid}
 
     def _anchor_joint_here(self, joint: int) -> None:
         """TOGGLE one joint's anchor at the current frame (using its CURRENT
@@ -3022,7 +3195,7 @@ class SkeletonCorrector(QMainWindow):
     _NAV_KEYS = frozenset({
         Qt.Key_Space, Qt.Key_W, Qt.Key_S, Qt.Key_Q, Qt.Key_E, Qt.Key_Z,
         Qt.Key_C, Qt.Key_A, Qt.Key_D, Qt.Key_Left, Qt.Key_Right, Qt.Key_K,
-        Qt.Key_F, Qt.Key_G,
+        Qt.Key_F, Qt.Key_G, Qt.Key_I,
     })
 
     def _handle_nav_key(self, k: int) -> bool:
@@ -3051,6 +3224,8 @@ class SkeletonCorrector(QMainWindow):
             self._copy_pose("frame")                    # copy prev frame -> current
         elif k == Qt.Key_G:
             self._copy_pose("kf")                       # copy prev keyframe -> current
+        elif k == Qt.Key_I:
+            self.ik_cb.toggle()                         # IK drag mode on/off
         else:
             return False
         return True
@@ -3112,5 +3287,5 @@ def main():
     sys.exit(app.exec_())
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()
