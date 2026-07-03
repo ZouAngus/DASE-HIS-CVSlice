@@ -78,6 +78,12 @@ def chain_maps(num_joints: int) -> tuple[dict[int, LimbChain], dict[int, LimbCha
     return ({c.eff: c for c in chains}, {c.mid: c for c in chains})
 
 
+def root_map(num_joints: int) -> dict[int, LimbChain]:
+    """root_joint (shoulder/hip) -> chain. Dragging a root in IK mode
+    translates the WHOLE chain rigidly (bone lengths untouched)."""
+    return {c.root: c for c in limb_chains(num_joints)}
+
+
 def reference_lengths(pts3d: np.ndarray, chain: LimbChain,
                       min_frames: int = 3) -> tuple[float, float] | None:
     """Per-clip locked bone lengths (l1 = root->mid, l2 = mid->eff).

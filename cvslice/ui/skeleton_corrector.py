@@ -266,6 +266,9 @@ class SkeletonCorrector(QMainWindow):
         a_consist = QAction("双视角一致性检查 (自动)...", self)
         a_consist.triggered.connect(self._consistency_check)
         tm.addAction(a_consist)
+        a_iklen = QAction("IK 骨长设置...", self)
+        a_iklen.triggered.connect(self._ik_len_dialog)
+        tm.addAction(a_iklen)
 
         # --- Central widget: cvslice-style 3-pane splitter ---
         central = QWidget()
@@ -1997,7 +2000,40 @@ class SkeletonCorrector(QMainWindow):
         chain = mid_map.get(joint)
         if chain is not None:
             return self._ik_move_mid(pidx, chain, target)
+        chain = ik.root_map(J).get(joint)
+        if chain is not None:
+            return self._ik_move_root(pidx, chain, target)
         return None                     # torso/head/hand/foot -> normal drag
+
+    def _ik_move_root(self, pidx: int, chain: ik.LimbChain,
+                      target: np.ndarray) -> set[int]:
+        """Dragging a shoulder/hip in IK mode translates the whole limb
+        rigidly: elbow/knee, wrist/ankle and hand/foot follow by the same
+        delta, so no bone in the chain changes length. (The connecting bone
+        ABOVE the root — e.g. collar->shoulder — does change; that is the
+        joint being moved.)"""
+        P = self.pts3d
+        old_root = P[pidx, chain.root]
+        if not np.all(np.isfinite(old_root)):
+            self.statusBar().showMessage(
+                f"IK: {chain.name}根部(关节 {chain.root})本帧无效,无法平移。")
+            return set()
+        delta = np.asarray(target, float) - old_root
+        joints = [chain.root, chain.mid, chain.eff]
+        if chain.rider is not None and chain.rider < P.shape[1]:
+            joints.append(chain.rider)
+        if not self._undo_pushed_for_drag:
+            self._push_undo()
+            self._undo_pushed_for_drag = True
+        moved: set[int] = set()
+        for j in joints:
+            if np.all(np.isfinite(P[pidx, j])):
+                P[pidx, j] = P[pidx, j] + delta
+                moved.add(j)
+        self._ik_overlay = {"chain": chain, "circle": None}
+        self.statusBar().showMessage(
+            f"IK: {chain.name}整肢平移(链内骨长不变)")
+        return moved
 
     def _ik_move_effector(self, pidx: int, chain: ik.LimbChain,
                           target: np.ndarray) -> set[int]:
@@ -2082,6 +2118,83 @@ class SkeletonCorrector(QMainWindow):
         self.statusBar().showMessage(
             f"IK: {chain.name}摆向已调整(末端与根部不动,骨长锁定)")
         return {chain.mid}
+
+    def _ik_len_dialog(self) -> None:
+        """View / override the locked IK bone lengths for this clip.
+
+        Default = per-clip median (robust to the frames being corrected). If a
+        whole clip's limb is bad the median itself is wrong — override it here.
+        Overrides live until another action/source is loaded (they are
+        per-clip by design, like the medians they replace)."""
+        if self.pts3d is None:
+            QMessageBox.information(self, "IK 骨长", "请先加载一个动作片段。")
+            return
+        J = self.pts3d.shape[1]
+        chains = ik.limb_chains(J)
+        if not chains:
+            QMessageBox.information(
+                self, "IK 骨长", f"当前骨架 ({J} 点) 不支持 IK。")
+            return
+        pidx = self._v2p(self.cur_frame)
+
+        def cur_frame_len(c: ik.LimbChain) -> tuple[float, float] | None:
+            a, b, e = (self.pts3d[pidx, c.root], self.pts3d[pidx, c.mid],
+                       self.pts3d[pidx, c.eff])
+            if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))
+                    and np.all(np.isfinite(e))):
+                return None
+            return (float(np.linalg.norm(b - a)), float(np.linalg.norm(e - b)))
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("IK 骨长设置 (本片段有效)")
+        lay = QVBoxLayout(dlg)
+        note = QLabel(
+            "IK 求解锁定的骨长。默认 = 本片段中位数;整段肢体都坏时中位数"
+            "也会不准,可在此手动改。单位与骨架数据一致(通常为米)。\n"
+            "作用范围 = 当前片段;切换动作后恢复为该片段的中位数。")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#888;")
+        lay.addWidget(note)
+        form = QFormLayout()
+        spins: dict[ik.LimbChain, tuple[QDoubleSpinBox, QDoubleSpinBox]] = {}
+        for c in chains:
+            ref = self._ik_lengths(c) or cur_frame_len(c) or (0.30, 0.25)
+            row = QHBoxLayout()
+            s1 = QDoubleSpinBox(); s2 = QDoubleSpinBox()
+            for s, v in ((s1, ref[0]), (s2, ref[1])):
+                s.setDecimals(3); s.setSingleStep(0.005)
+                s.setRange(0.01, 2.0); s.setValue(v)
+            row.addWidget(QLabel("上骨:")); row.addWidget(s1)
+            row.addWidget(QLabel("下骨:")); row.addWidget(s2)
+            w = QWidget(); w.setLayout(row)
+            form.addRow(f"{c.name} ({c.root}→{c.mid}→{c.eff}):", w)
+            spins[c] = (s1, s2)
+        lay.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        b_med = QPushButton("全部重置为片段中位数")
+        b_cur = QPushButton("全部读取当前帧骨长")
+
+        def fill(getter) -> None:
+            for c, (s1, s2) in spins.items():
+                v = getter(c)
+                if v is not None:
+                    s1.setValue(v[0]); s2.setValue(v[1])
+
+        b_med.clicked.connect(lambda: fill(
+            lambda c: ik.reference_lengths(self.pts3d, c)))
+        b_cur.clicked.connect(lambda: fill(cur_frame_len))
+        btn_row.addWidget(b_med); btn_row.addWidget(b_cur)
+        lay.addLayout(btn_row)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        for c, (s1, s2) in spins.items():
+            self._ik_len_cache[(c.root, c.mid, c.eff)] = (
+                float(s1.value()), float(s2.value()))
+        self.statusBar().showMessage("IK 骨长已更新(仅本片段生效)。")
 
     def _anchor_joint_here(self, joint: int) -> None:
         """TOGGLE one joint's anchor at the current frame (using its CURRENT

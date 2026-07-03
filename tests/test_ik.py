@@ -155,3 +155,12 @@ def test_sample_circle_points_lie_on_circle():
     d = np.linalg.norm(pts - center, axis=1)
     assert np.allclose(d, 0.5, atol=1e-9)
     assert np.allclose((pts - center) @ axis, 0.0, atol=1e-9)
+
+
+def test_root_map_for_rigid_limb_translation():
+    r24 = ik.root_map(24)
+    assert set(r24) == {16, 17, 1, 2}                   # shoulders + hips
+    assert r24[16].eff == 20 and r24[16].rider == 22
+    r17 = ik.root_map(17)
+    assert set(r17) == {11, 14, 1, 4}
+    assert ik.root_map(37) == {}
