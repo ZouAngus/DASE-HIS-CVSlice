@@ -370,43 +370,38 @@ class SkeletonCorrector(QMainWindow):
         right_inner = QWidget()
         rp = QVBoxLayout(right_inner)
 
+        # Compact mode panel: long explanations live in tooltips, not labels.
         mode_g = QGroupBox("关节模式")
+        mode_g.setToolTip(
+            "拖动关节 = 修改位置;点击关节(不拖)= 用当前姿态把它锚定/"
+            "取消锚定到当前帧(好的原始帧就这样钉)。")
         mg = QVBoxLayout(mode_g)
         self.mode_all = QCheckBox("编辑所有关节 (All)")
         self.mode_all.setChecked(True)
+        self.mode_all.setToolTip(
+            "取消勾选 → 单关节模式:点击选中后只能拖动该关节。\n"
+            "点击关节(不拖)= 锚定/取消锚定到当前帧。")
         self.mode_all.stateChanged.connect(self._on_mode_changed)
         mg.addWidget(self.mode_all)
-        h = QLabel("取消勾选 → 单关节模式: 点击选中后只能拖动该关节。")
-        h.setWordWrap(True)
-        h.setStyleSheet("color:#888;")
-        mg.addWidget(h)
         self.sel_joint_lbl = QLabel("选中关节: -")
         mg.addWidget(self.sel_joint_lbl)
-        click_h = QLabel("拖动关节 = 修改位置;点击关节(不拖)= 用当前姿态"
-                         "把它锚定/取消锚定到当前帧(好的原始帧就这样钉)。")
-        click_h.setWordWrap(True)
-        click_h.setStyleSheet("color:#888;")
-        mg.addWidget(click_h)
         self.two_view_cb = QCheckBox("双视角三角化拖拽")
+        self.two_view_cb.setChecked(True)
         self.two_view_cb.setToolTip(
-            "在上、下视图分别拖同一关节,自动三角化出精确3D(不用猜深度)。"
-            "拖了一个视图后,另一视图会画出该关节的极线作引导。")
+            "在上、下视图分别拖同一关节,两视角射线三角化出精确 3D 深度"
+            "(不用猜远近)。拖了一个视图后,另一视图画出该关节的极线作引导,"
+            "沿极线放一下即可。")
         mg.addWidget(self.two_view_cb)
-        tv_h = QLabel("先在一个视图拖关节(另一视图出现极线),再到另一视图沿极线"
-                      "放一下 → 两视角射线三角化出精确深度,消除来回拉锯。")
-        tv_h.setWordWrap(True)
-        tv_h.setStyleSheet("color:#888;")
-        mg.addWidget(tv_h)
-        self.ik_cb = QCheckBox("🦾 IK 拖动 (I): 拖腕/踝带整肢, 骨长锁定")
+        self.ik_cb = QCheckBox("🦾 IK 拖动 (I)")
+        self.ik_cb.setChecked(True)
         self.ik_cb.setToolTip(
             "两骨 IK 模式,规则固定无歧义:\n"
-            "• 拖 腕/踝 → 肩/髋不动,肘/膝自动落位;上臂/前臂骨长锁定为"
-            "本片段中位数;手/脚随腕/踝刚性跟随。\n"
-            "• 目标超出可及范围 → 肢体完全伸直,末端钳到最大伸展处 —— "
-            "直臂绝不会被折弯。\n"
-            "• 拖 肘/膝 → 腕/踝不动,肘/膝只在骨长允许的圆弧(黄圈)上滑动,"
-            "即调摆动平面;完全伸直时无圆弧,会提示先拖腕。\n"
-            "• 其余关节(肩/髋/躯干/头/手/脚)不受影响,仍是普通拖动。\n"
+            "• 腕/踝 → 整肢求解:肩/髋不动,肘/膝自动落位,骨长锁定为本片段"
+            "中位数;超出可及范围 → 完全伸直并钳制(直臂绝不折弯)。\n"
+            "• 肘/膝 → 只在骨长允许的圆弧(黄圈)上滑动 = 调摆向。\n"
+            "• 肩/髋 → 整肢刚性平移;骨盆 → 整个骨架平移;\n"
+            "  脊柱/颈/锁骨 → 关节+子树平移;手/脚/头 → 绕父关节球面滑动。\n"
+            "• 骨长可在「工具 ▸ IK 骨长设置...」查看/覆盖。\n"
             "• 与『双视角三角化拖拽』兼容:目标点按原逻辑取得后再做 IK。")
         self.ik_cb.toggled.connect(
             lambda on: self.statusBar().showMessage(
@@ -416,10 +411,10 @@ class SkeletonCorrector(QMainWindow):
         rp.addWidget(mode_g)
 
         ej_g = QGroupBox("已编辑关节 / 关键帧数")
+        ej_g.setToolTip("视图中关节号配色:绿=≥2关键帧(会插值) "
+                        "橙=仅1帧(不插,需再加) 灰=未编辑;品红点=本帧标注")
         ejl = QVBoxLayout(ej_g)
-        ej_legend = QLabel("视图中关节号配色:绿=≥2关键帧(会插值) "
-                           "橙=仅1帧(不插,需再加) 灰=未编辑;品红点=本帧标注")
-        ej_legend.setWordWrap(True)
+        ej_legend = QLabel("绿≥2帧 橙=1 灰=无 | 品红点=本帧")
         ej_legend.setStyleSheet("color:#888; font-size:11px;")
         ejl.addWidget(ej_legend)
         self.edited_list = QListWidget()
@@ -651,9 +646,8 @@ class SkeletonCorrector(QMainWindow):
         self._play_timer.timeout.connect(self._tick)
 
         self.statusBar().showMessage(
-            "文件 ▸ 打开文件夹 加载导出目录。  快捷键: 空格=播放/暂停  "
-            "A/D=前/后一帧  Q/E=上视图相机  Z/C=下视图相机  W/S=切换动作  K=关键帧  "
-            "F=复制上一帧  G=复制上一关键帧")
+            "文件 ▸ 打开文件夹 加载导出目录 | 空格=播放 A/D=帧 W/S=动作 "
+            "K=关键帧 I=IK N=可疑帧 (完整快捷键见 README)")
 
     # ----------------------------------------------------------------- IO
 
@@ -914,9 +908,12 @@ class SkeletonCorrector(QMainWindow):
         return act["tag"] if s is None else f"[{s:5.1f}] {act['tag']}"
 
     def _sort_actions_by_qc(self) -> None:
-        """Worst-first; unscored actions keep their order at the end."""
-        self._actions.sort(
-            key=lambda a: -(self._qc_score(a["tag"]) or -1.0))
+        """Worst-first; unscored actions keep their order at the end.
+        (Explicit None check: a legitimate score of 0.0 must sort as scored.)"""
+        def key(a: dict) -> float:
+            s = self._qc_score(a["tag"])
+            return -s if s is not None else 1.0
+        self._actions.sort(key=key)
 
     def _refill_action_list(self, keep_tag: str | None = None) -> None:
         """Rebuild the list widget from self._actions (signals blocked).
@@ -959,7 +956,8 @@ class SkeletonCorrector(QMainWindow):
         tag = (self._actions[self._cur_action_idx]["tag"]
                if 0 <= self._cur_action_idx < len(self._actions) else None)
         r = self._qc.get(tag) if tag else None
-        suspects = set(r.get("suspect_frames", [])) if r else set()
+        suspects = (set(r.get("suspect_frames", []))
+                    if isinstance(r, dict) else set())
         if not suspects:
             self.statusBar().showMessage(
                 "本片段没有 QC 可疑帧记录 (无报告或全段正常)。")
@@ -1180,6 +1178,7 @@ class SkeletonCorrector(QMainWindow):
         self._tv2d.clear()
         self._ik_len_cache.clear()       # bone lengths are per-clip
         self._ik_overlay = None
+        self._ik_unsupported_warned = False
         self._selected_joint = None
         self.sel_joint_lbl.setText("选中关节: -")
 
@@ -2091,8 +2090,11 @@ class SkeletonCorrector(QMainWindow):
         J = self.pts3d.shape[1]
         eff_map, mid_map = ik.chain_maps(J)
         if not eff_map:
-            self.statusBar().showMessage(
-                f"IK: 当前骨架 ({J} 点) 不支持 IK,已按普通拖动处理。")
+            # Warn once per action, not on every mouse-move of every drag.
+            if not getattr(self, "_ik_unsupported_warned", False):
+                self._ik_unsupported_warned = True
+                self.statusBar().showMessage(
+                    f"IK: 当前骨架 ({J} 点) 不支持 IK,已按普通拖动处理。")
             return None
         chain = eff_map.get(joint)
         if chain is not None:
