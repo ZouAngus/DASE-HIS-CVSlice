@@ -53,8 +53,10 @@ interaction, automatic procedure assessment, and behavioral analysis for
 safety-critical training. Yet every widely used HAR benchmark implicitly
 assumes conditions that a CAVE violates: frontal tripod-height viewpoints,
 stable photometric backgrounds, and offline evaluation. We present
-\DATASET{}, the first HAR benchmark captured inside an operational
-projection-based CAVE. It provides synchronized multi-view RGB video from
+\DATASET{} (\textbf{CAVE} \textbf{A}c\textbf{T}ions), the first HAR
+benchmark captured inside an operational projection-based CAVE---and, we
+hope, a literal caveat for models benchmarked only in conventional
+laboratories. It provides synchronized multi-view RGB video from
 seven cameras---including the top-mounted, steeply pitched views forced by
 CAVE geometry---together with optical-motion-capture-grade 3D skeleton
 ground truth (SMPL layout, 22 joints) for 15 actors performing 7 general
@@ -94,7 +96,8 @@ clips without latency constraints, whereas interactive VR imposes tight
 motion-to-response budgets. The gap between these assumptions and CAVE
 reality is unquantified because no suitable benchmark exists.
 
-We close this gap with \DATASET{}\footnote{\DATASET{} = \textbf{CAVE} \textbf{A}c\textbf{T}ions --- also, we hope, a literal \emph{caveat} for action recognition models benchmarked only in conventional laboratories.}, captured in a
+We close this gap with \DATASET{} (\textbf{CAVE}
+\textbf{A}c\textbf{T}ions), captured in a
 \todo{CAVE 尺寸/面数确认: 幻灯片同时出现 ``5 faces active'' 与 ``6-sided''
 (G2)} projection CAVE instrumented with 12 OptiTrack Prime$^{\mathrm{x}}$13
 motion-capture cameras and 7 RGB cameras. Our contributions are:
