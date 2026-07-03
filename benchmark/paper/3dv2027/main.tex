@@ -1,0 +1,349 @@
+% =========================================================================
+% CAVE-HAR — 3DV 2027 draft (target deadline: Aug 28, 2026 AoE)
+% -------------------------------------------------------------------------
+% NOTE: 3DV uses the CVF-style two-column format. Before submission,
+% replace this preamble with the official 3DV 2027 author kit (expected on
+% https://3dvconf.github.io/2027/call-for-papers/) and delete the \todo
+% macro output by switching \todofalse. All open gaps are marked \todo{...}
+% and indexed in ../GAPS.md with owner + producing phase.
+% =========================================================================
+\documentclass[10pt,twocolumn,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}   % replaced by official style file
+\usepackage{times}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{pifont}   % \ding crosses in the dataset comparison table
+\usepackage{xcolor}
+\usepackage[pagebackref,breaklinks,colorlinks,citecolor=blue]{hyperref}
+
+% ---- draft machinery ----------------------------------------------------
+\newif\iftodos \todostrue   % \todosfalse hides all TODO markers
+\newcommand{\todo}[1]{\iftodos\textcolor{red}{\textbf{[TODO: #1]}}\fi}
+\newcommand{\DATASET}{CAVE-HAR\todo{数据集正式命名待定 (G1)}}
+\newcommand{\numclips}{\todo{清洗后片段总数 (G8)}}
+
+\begin{document}
+
+\title{\DATASET: A Multi-View Benchmark for Human Action Recognition\\
+in Immersive CAVE Environments}
+
+\author{Anonymous 3DV 2027 submission\\Paper ID \todo{****}}
+\date{}
+\maketitle
+
+% =========================================================================
+\begin{abstract}
+Human action recognition (HAR) inside large-scale immersive systems such as
+CAVEs (Cave Automatic Virtual Environments) promises marker-less
+interaction, automatic procedure assessment, and behavioral analysis for
+safety-critical training. Yet every widely used HAR benchmark implicitly
+assumes conditions that a CAVE violates: frontal tripod-height viewpoints,
+stable photometric backgrounds, and offline evaluation. We present
+\DATASET{}, the first HAR benchmark captured inside an operational
+projection-based CAVE. It provides synchronized multi-view RGB video from
+seven cameras---including the top-mounted, steeply pitched views forced by
+CAVE geometry---together with optical-motion-capture-grade 3D skeleton
+ground truth (SMPL layout, 22 joints) for 15 actors performing 7 general
+and 11 VR-interaction actions across 6 projected scenes. Because the
+projected VR content changes the entire visual background under controlled
+conditions, \DATASET{} additionally enables a background-shift evaluation
+that is impossible to stage in real-world scenes. We define four evaluation
+protocols (cross-subject, cross-view, cross-scene, and cross-domain from
+NTU~RGB+D~120), plus a latency-aware protocol that reports computation and
+observation latency for streaming recognition. Benchmarking
+\todo{N (G13)} representative skeleton, video, and multimodal models
+reveals \todo{核心发现一句话, 需实验后填 (G13)}. The dataset, evaluation
+code, and correction toolchain will be publicly released.
+\end{abstract}
+
+% =========================================================================
+\section{Introduction}
+Projection-based immersive systems such as the CAVE~\cite{cruzneira1993cave}
+remain the platform of choice when virtual reality must be combined with
+free full-body movement, unobstructed vision of one's own body, and
+multi-user co-presence---requirements typical of industrial safety
+training, rehabilitation, and simulation. Human action recognition inside
+such environments would enable automatic evaluation of trainee procedures,
+marker-less interaction, and quantitative behavioral analysis.
+
+Modern HAR models are, however, trained and evaluated almost exclusively on
+datasets that encode three assumptions. First, \emph{fixed frontal
+geometry}: cameras in NTU~RGB+D~\cite{shahroudy2016ntu,liu2020ntu120} and
+its successors observe subjects from tripod height at moderate distances,
+whereas a CAVE forces cameras to its ceiling rim, producing steep pitch
+angles and systematic self-occlusion of hands and head during interaction.
+Second, \emph{appearance stability}: laboratory backgrounds are static,
+whereas a CAVE's walls and floor \emph{are} the display---the background
+changes radically with the projected scene and its light spills onto the
+actor. Third, \emph{offline evaluation}: accuracy is reported on trimmed
+clips without latency constraints, whereas interactive VR imposes tight
+motion-to-response budgets. The gap between these assumptions and CAVE
+reality is unquantified because no suitable benchmark exists.
+
+We close this gap with \DATASET{}, captured in a
+\todo{CAVE 尺寸/面数确认: 幻灯片同时出现 ``5 faces active'' 与 ``6-sided''
+(G2)} projection CAVE instrumented with 12 OptiTrack Prime$^{\mathrm{x}}$13
+motion-capture cameras and 7 RGB cameras. Our contributions are:
+\begin{itemize}
+  \item \textbf{Dataset.} \numclips{} clips of 15 actors (9M/6F), 6
+        projected scenes (3 indoor, 3 outdoor), 7 general + 11
+        VR-interaction actions, with synchronized 7-view RGB and
+        mocap-grade SMPL-22 skeletons---to our knowledge the first HAR
+        corpus recorded inside an operational CAVE, and the first with
+        top-mounted viewpoints as a primary condition.
+  \item \textbf{Human-verified ground truth.} A correction pipeline
+        combining per-clip quality scoring, two-view triangulated editing,
+        and bone-length-preserving inverse-kinematics tools; all released
+        test-split skeletons are manually verified
+        (\todo{修正帧占比 X\% (G9)}, inter-annotator agreement
+        \todo{Y mm (G10)}).
+  \item \textbf{Protocols.} Cross-subject, cross-view, cross-scene, and
+        NTU$\rightarrow$\DATASET{} cross-domain splits, plus a
+        latency-aware streaming protocol reporting computation and
+        observation latency.
+  \item \textbf{Baselines.} \todo{N (G13)} models spanning skeleton GCNs
+        and transformers, video networks, and multimodal fusion, with an
+        analysis of where and why they fail under CAVE conditions.
+\end{itemize}
+
+% =========================================================================
+\section{Related Work}
+\paragraph{HAR datasets.}
+NTU~RGB+D~\cite{shahroudy2016ntu} and NTU~RGB+D~120~\cite{liu2020ntu120}
+established the dominant evaluation setting: 106 subjects, 120 classes,
+Kinect-estimated skeletons, frontal/side views. ANUBIS~\cite{yu2022anubis}
+added rear viewpoints and finer-grained interactions with Azure-Kinect
+skeletons. Kinetics~\cite{kay2017kinetics} scales to web video without 3D
+ground truth. All estimate skeletons from consumer depth sensors or 2D
+pose; none offers optical-mocap-grade joints, top-mounted views, or
+projected-background variation. Our comparison appears in
+Table~\ref{tab:datasets}.
+
+\paragraph{User behavior corpora in VR.}
+LocoVR~\cite{takeyama2024locovr} records multi-user locomotion trajectories
+in HMD-based VR; HUMOTO~\cite{lu2025humoto} provides mocap human--object
+interactions without multi-view RGB. HMD-based corpora observe users
+wearing headsets that occlude the face and alter motion; CAVE users wear
+only lightweight shutter glasses, keeping appearance close to natural while
+introducing the projection-specific challenges we target. RoCoG-v2
+\cite{reddy2023rocog} studies synthetic-to-real domain shift for gestures,
+methodologically related to our cross-domain protocol.
+
+\paragraph{Models.}
+Skeleton-based recognition evolved from graph convolutions
+(ST-GCN~\cite{yan2018stgcn}, CTR-GCN~\cite{chen2021ctrgcn}) to
+attention and prototype-based designs (SkateFormer~\cite{do2024skateformer},
+ProtoGCN~\cite{liu2025protogcn}), state-space models
+(SkelMamba~\cite{martinel2024skelmamba}), and pretrained motion encoders
+(MotionBERT~\cite{zhu2023motionbert}). Video models progressed from
+two-pathway CNNs (SlowFast~\cite{feichtenhofer2019slowfast}) to
+transformers (Video Swin~\cite{liu2022videoswin},
+VideoMAE~v2~\cite{wang2023videomae2}) and state-space architectures
+(VideoMamba~\cite{li2024videomamba}); language--vision pretraining enables
+zero-shot transfer (ActionCLIP~\cite{wang2021actionclip}); and
+PoseConv3D~\cite{duan2022poseconv3d} fuses pose heatmaps with RGB. We
+benchmark representatives of each family.
+
+\paragraph{Online and latency-aware evaluation.}
+Online action detection~\cite{degeest2016oad} and streaming perception
+argue that offline accuracy overstates deployable performance; recent work
+separates \emph{computation} latency from \emph{observation} latency
+\cite{eyzaguirre2024squid}. VR interaction makes these constraints
+first-class, motivating our protocol.
+
+% =========================================================================
+\section{The \DATASET{} Dataset}
+
+\subsection{Capture environment}
+Recording took place in the \todo{机构匿名化处理后的 CAVE 描述 + 尺寸
+(G2)} CAVE. Twelve OptiTrack Prime$^{\mathrm{x}}$13 cameras capture 3D
+motion at 240\,Hz; seven RGB cameras (\todo{型号/分辨率/帧率 (G3)},
+nominally 30\,fps) cover the volume in a $3{\times}2$ grid on the left,
+center, and right rim at high and low mounting positions, plus one
+diagonal rear view. Fig.~\ref{fig:rig}\todo{相机布置图 (G4)} shows the
+layout; the ``high'' row is top-mounted at pitch angles of
+\todo{俯仰角度数 (G3)}, the geometry that distinguishes CAVE deployments
+from tripod-based datasets.
+
+Two collection rounds were performed. Round~1 (portal-configuration LED
+CAVE, \todo{7 或 8 (幻灯片不一致, G5)} mocap + 2 RGB cameras) served as a
+pilot; Round~2, described above, is the release configuration. Actors wore
+everyday clothing with 37 retro-reflective markers; Round~2 used low-profile
+marker stickers to minimize visual interference with the RGB streams.
+
+\subsection{Actors, scenes, and actions}
+Fifteen actors (9 male, 6 female; \todo{年龄范围/身高范围, 需 roster (G6)})
+each performed in six projected scenes (three indoor, three outdoor),
+approximately 20 effective minutes per scene and roughly 41{,}400 mocap
+frames per actor. The action vocabulary (Table~\ref{tab:actions}) contains
+seven general actions shared with existing benchmarks---enabling direct
+cross-domain comparison---and eleven VR-interaction actions elicited by the
+projected applications, from controller locomotion to catching virtual
+fish with a physical net prop.
+
+\begin{table}[t]\centering\small
+\caption{Action vocabulary: 7 general + 11 VR-interaction classes.}
+\label{tab:actions}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{General} & \textbf{VR-interaction} \\
+\midrule
+walking      & move via controller \\
+running      & catch fish with net \\
+jumping      & grab box \\
+bending down & measure length \\
+standing     & wave \\
+squatting    & throw \\
+raising hand & cut \\
+             & shoot \\
+             & pick up item \\
+             & go up stairs \\
+             & dodge car \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table*}[t]\centering\small
+\caption{Comparison with existing HAR and VR-behavior datasets.
+\todo{逐格核对数字并补齐空格 (G7)}}
+\label{tab:datasets}
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+Dataset & Subjects & Classes & Clips & Skeleton source & Top-mounted views & Controlled background shift \\
+\midrule
+NTU RGB+D 120~\cite{liu2020ntu120} & 106 & 120 & 114{,}480 & Kinect v2 & \ding{55} & \ding{55} \\
+ANUBIS~\cite{yu2022anubis} & 80 & 102 & 66{,}232 & Azure Kinect & \ding{55} & \ding{55} \\
+LocoVR~\cite{takeyama2024locovr} & \todo{} & locomotion & \todo{} & HMD tracking & \ding{55} & \ding{55} \\
+\DATASET{} (ours) & 15 & 18 & \numclips & optical mocap + MoSh++ & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Calibration and synchronization}
+RGB intrinsics and extrinsics follow Zhang's method~\cite{zhang1999calib}
+with per-session refinement; extrinsic drift is monitored by
+re-projecting triangulated 2D poses and gating on median residual
+(\todo{标定精度: 平均重投影误差 px (G11)}). Lacking hardware genlock,
+video--skeleton alignment uses a per-clip timeline established from the
+mocap clock, refined per camera with sub-frame offsets and verified by
+overlay inspection; final alignment accuracy is \todo{同步精度 ±帧 (G11)}.
+
+\subsection{Ground-truth construction}
+Raw 240\,Hz markers are solved to SMPL~\cite{loper2015smpl} bodies with
+MoSh++~\cite{mahmood2019amass}; we release the 22-joint SMPL subset
+(hand joints excluded owing to sparse hand markers) in both world
+coordinates and pelvis-centered normalized form. Sparse marker coverage
+and interaction props cause characteristic failures---frozen or drifting
+limb segments---which we repair with a purpose-built toolchain: (i) every
+clip receives an automatic quality score combining bone-length deviation,
+robust velocity-spike detection, frozen-joint-while-moving runs, and
+missing-marker fraction, which prioritizes review worst-first;
+(ii) annotators correct joints by dragging in two calibrated views
+simultaneously (exact triangulated depth) with keyframe--spline
+propagation; and (iii) a bone-length-preserving two-bone IK mode solves
+whole-limb placements from a single wrist/ankle drag, guaranteeing
+physically plausible corrections that never fold a straight limb. All
+test-split clips are fully verified; training-split clips are corrected
+worst-first by quality score with per-frame edit masks released
+(\todo{银标准修正比例 (G9)}). Corrections modified \todo{X\% (G9)} of
+test-split frames; dual-annotation of a 5\% sample shows mean joint
+disagreement of \todo{Y mm (G10)}.
+
+\subsection{Statistics}
+\todo{最终统计表: 每类样本数/时长分布/marker 丢失率/QC 分布直方图,
+清洗后生成 (G8)}
+
+% =========================================================================
+\section{Benchmark Protocols}
+\paragraph{Cross-subject (X-Sub, primary).}
+Three fixed 10-train/5-test actor partitions (seeded, gender-balanced
+\todo{性别核对后确认 (G12)}); we report mean$\pm$std over the three
+partitions to control for small-cohort variance.
+\paragraph{Cross-view (X-View).}
+Train on low-rim views, test on top-mounted and diagonal-rear views,
+isolating the viewpoint gap.
+\paragraph{Cross-scene (X-Scene).}
+Train on the three indoor projections, test on the three outdoor ones:
+identical actions, radically different projected backgrounds---a
+controlled background-shift experiment unavailable in real-world corpora.
+\paragraph{Cross-domain.}
+Models pretrained on NTU RGB+D 120 are evaluated zero-shot and after
+fine-tuning, quantifying the lab-to-CAVE domain gap that motivates this
+work.
+\paragraph{Metrics.}
+Top-1/Top-5 accuracy and mean per-class accuracy (the 18-class vocabulary
+is imbalanced across interaction types); confusion analyses separate
+general from interaction classes.
+\paragraph{Latency-aware protocol.}
+For streaming deployment we report (i)~\emph{computation latency}:
+single-clip inference time on one \todo{评测 GPU 型号 (G14)}, and
+(ii)~\emph{observation latency}: the minimum observed-frame budget at
+which a model reaches 90\% of its full-clip accuracy
+\cite{degeest2016oad,eyzaguirre2024squid}, yielding accuracy--latency
+curves (Fig.~\todo{latency 图 (G15)}).
+
+% =========================================================================
+\section{Experiments}
+\todo{整节数字待 P3 实验产出 (G13). 表格骨架已按分工排好.}
+
+\begin{table}[t]\centering\small
+\caption{Baselines on \DATASET{} (Top-1 / mean per-class, \%).
+\todo{全部数字 (G13)}}
+\label{tab:baselines}
+\begin{tabular}{@{}llccc@{}}
+\toprule
+Model & Modality & X-Sub & X-View & X-Scene \\
+\midrule
+ST-GCN~\cite{yan2018stgcn}             & Skel. & \todo{} & \todo{} & \todo{} \\
+CTR-GCN~\cite{chen2021ctrgcn}          & Skel. & \todo{} & \todo{} & \todo{} \\
+SkateFormer~\cite{do2024skateformer}   & Skel. & \todo{} & \todo{} & \todo{} \\
+SkelMamba~\cite{martinel2024skelmamba} & Skel. & \todo{} & \todo{} & \todo{} \\
+MotionBERT~\cite{zhu2023motionbert}    & Skel. & \todo{} & \todo{} & \todo{} \\
+SlowFast~\cite{feichtenhofer2019slowfast} & RGB & \todo{} & \todo{} & \todo{} \\
+Video Swin~\cite{liu2022videoswin}     & RGB   & \todo{} & \todo{} & \todo{} \\
+VideoMAE v2~\cite{wang2023videomae2}   & RGB   & \todo{} & \todo{} & \todo{} \\
+VideoMamba~\cite{li2024videomamba}     & RGB   & \todo{} & \todo{} & \todo{} \\
+ActionCLIP~\cite{wang2021actionclip}   & RGB+T & \todo{} & \todo{} & \todo{} \\
+PoseConv3D~\cite{duan2022poseconv3d}   & Skel.+RGB & \todo{} & \todo{} & \todo{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Cross-domain gap.} \todo{NTU 预训练 zero-shot/finetune 表 (G13)}
+\paragraph{Viewpoint analysis.} \todo{逐相机准确率 + 遮挡消融 (G13)}
+\paragraph{Zero-shot recognition.} \todo{ActionCLIP 零样本结果 (G13)}
+\paragraph{Latency.} \todo{accuracy-latency 曲线与讨论 (G13, G15)}
+\paragraph{Qualitative results.} \todo{成功/失败案例可视化 (G16)}
+
+% =========================================================================
+\section{Limitations and Ethics}
+\DATASET{} is captured in a single CAVE installation with 15 actors; the
+cohort size follows from mocap-suit logistics and is mitigated by the
+multi-partition X-Sub protocol, but broader demographic coverage is future
+work. Hand joints are excluded from the official set because sparse hand
+markers make them unreliable. Training-split skeletons are corrected
+worst-first rather than exhaustively; per-frame edit masks make the
+verification status of every joint transparent. All participants gave
+written informed consent covering public release of RGB video and derived
+data under an institution-approved protocol
+(\todo{伦理批号, 投稿系统需要 (G17)}); raw uncorrected captures are not
+distributed. \todo{面部是否模糊处理的最终决定 (G17)}
+
+\section{Conclusion}
+\DATASET{} turns an operational CAVE into a benchmark, pairing
+mocap-grade skeletons with the viewpoints, backgrounds, and latency
+constraints that immersive deployment actually imposes. Our baselines show
+\todo{一句话结论 (G13)}, and the released toolchain lowers the cost of
+extending the corpus. We hope \DATASET{} seeds a line of HAR research that
+treats immersive environments as a first-class setting rather than an
+afterthought.
+
+{\small
+\bibliographystyle{ieee_fullname}
+\bibliography{refs}
+}
+
+\end{document}
