@@ -157,6 +157,10 @@ class SkeletonCorrector(QMainWindow):
         self._ik_len_cache: dict[tuple[int, int, int], tuple[float, float]] = {}
         self._ik_overlay: dict | None = None
 
+        # Per-scene QC report (tools/qc_scan.py output): tag -> score dict.
+        # Purely advisory: drives list ordering + N-key suspect navigation.
+        self._qc: dict = {}
+
         # Edit mode
         self._selected_joint: int | None = None
         self.edited_joints: set[int] = set()
@@ -304,6 +308,13 @@ class SkeletonCorrector(QMainWindow):
         lp.addWidget(sel_g)
 
         lp.addWidget(QLabel("动作 (双击/方向键切换, W/S 上下一个):"))
+        self.qc_sort_cb = QCheckBox("按 QC 分排序 (最差先)")
+        self.qc_sort_cb.setToolTip(
+            "读取场景文件夹里的 qc_report.json (由 tools/qc_scan.py 生成),\n"
+            "把动作按质量分从差到好排序,并在名字前显示分数。\n"
+            "没有报告时此选项无效果。N 键 = 跳到下一个可疑帧。")
+        self.qc_sort_cb.toggled.connect(self._on_qc_sort_toggled)
+        lp.addWidget(self.qc_sort_cb)
         self.action_list = QListWidget()
         self.action_list.currentRowChanged.connect(self._on_action_changed)
         lp.addWidget(self.action_list, 1)
@@ -856,14 +867,13 @@ class SkeletonCorrector(QMainWindow):
         self._progress = self._load_progress(folder)
         self._edited.clear()    # edited skeletons restored per-action from _edited.pkl
 
+        # QC report (advisory): score column + worst-first sort + N-key nav.
+        self._qc = self._load_qc_report(folder)
+        if self.qc_sort_cb.isChecked():
+            self._sort_actions_by_qc()
+
         # Populate action list (block signals; load row 0 explicitly below)
-        self.action_list.blockSignals(True)
-        self.action_list.clear()
-        for a in actions:
-            self.action_list.addItem(a["tag"])
-        if actions:
-            self.action_list.setCurrentRow(0)
-        self.action_list.blockSignals(False)
+        self._refill_action_list()
 
         self._load_action(0)
 
@@ -876,6 +886,96 @@ class SkeletonCorrector(QMainWindow):
                 if n_restored else ("  |  已载入进度" if self._progress else ""))
         self.statusBar().showMessage(
             f"场景: {scene['name']}  |  {len(actions)} 个动作{extra}{prog}")
+
+    # ------------------------------------------------------------- QC report
+    @staticmethod
+    def _load_qc_report(folder: str) -> dict:
+        """Read tools/qc_scan.py's qc_report.json (advisory; may be absent)."""
+        path = os.path.join(folder, "qc_report.json")
+        if not os.path.isfile(path):
+            return {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+            d.pop("_meta", None)
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+
+    def _qc_score(self, tag: str) -> float | None:
+        r = self._qc.get(tag)
+        try:
+            return float(r["score"]) if r else None
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _action_label(self, act: dict) -> str:
+        s = self._qc_score(act["tag"])
+        return act["tag"] if s is None else f"[{s:5.1f}] {act['tag']}"
+
+    def _sort_actions_by_qc(self) -> None:
+        """Worst-first; unscored actions keep their order at the end."""
+        self._actions.sort(
+            key=lambda a: -(self._qc_score(a["tag"]) or -1.0))
+
+    def _refill_action_list(self, keep_tag: str | None = None) -> None:
+        """Rebuild the list widget from self._actions (signals blocked).
+        Selects ``keep_tag``'s row when given, else row 0."""
+        self.action_list.blockSignals(True)
+        self.action_list.clear()
+        row = 0
+        for i, a in enumerate(self._actions):
+            self.action_list.addItem(self._action_label(a))
+            if keep_tag is not None and a["tag"] == keep_tag:
+                row = i
+        if self._actions:
+            self.action_list.setCurrentRow(row)
+        self.action_list.blockSignals(False)
+
+    def _on_qc_sort_toggled(self, on: bool) -> None:
+        if not self._actions:
+            return
+        if not self._qc and on:
+            self.statusBar().showMessage(
+                "本场景没有 qc_report.json —— 先运行 tools/qc_scan.py 生成。")
+            return
+        cur_tag = (self._actions[self._cur_action_idx]["tag"]
+                   if 0 <= self._cur_action_idx < len(self._actions) else None)
+        if on:
+            self._sort_actions_by_qc()
+        else:
+            self._actions.sort(key=lambda a: a["tag"])
+        self._refill_action_list(keep_tag=cur_tag)
+        # Row indices changed: keep _cur_action_idx consistent WITHOUT reloading.
+        if cur_tag is not None:
+            self._cur_action_idx = next(
+                (i for i, a in enumerate(self._actions) if a["tag"] == cur_tag),
+                self._cur_action_idx)
+
+    def _jump_next_suspect(self) -> None:
+        """N key: jump to the next QC-flagged suspect frame (wraps around)."""
+        if not self._actions or self.pts3d is None:
+            return
+        tag = (self._actions[self._cur_action_idx]["tag"]
+               if 0 <= self._cur_action_idx < len(self._actions) else None)
+        r = self._qc.get(tag) if tag else None
+        suspects = set(r.get("suspect_frames", [])) if r else set()
+        if not suspects:
+            self.statusBar().showMessage(
+                "本片段没有 QC 可疑帧记录 (无报告或全段正常)。")
+            return
+        lo, hi = self._play_lo, self._play_hi
+        order = list(range(self.cur_frame + 1, hi + 1)) + \
+            list(range(lo, self.cur_frame + 1))
+        for v in order:
+            if self._v2p(v) in suspects:
+                self.cur_frame = v
+                self.slider.setValue(v)
+                self.statusBar().showMessage(
+                    f"QC: 跳到可疑帧 video {v} (skel {self._v2p(v)});"
+                    f" 本片段共 {len(suspects)} 个可疑骨架帧。")
+                return
+        self.statusBar().showMessage("QC: 可疑帧不在当前可播放范围内。")
 
     def _on_action_changed(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._actions):
@@ -3373,7 +3473,7 @@ class SkeletonCorrector(QMainWindow):
     _NAV_KEYS = frozenset({
         Qt.Key_Space, Qt.Key_W, Qt.Key_S, Qt.Key_Q, Qt.Key_E, Qt.Key_Z,
         Qt.Key_C, Qt.Key_A, Qt.Key_D, Qt.Key_Left, Qt.Key_Right, Qt.Key_K,
-        Qt.Key_F, Qt.Key_G, Qt.Key_I,
+        Qt.Key_F, Qt.Key_G, Qt.Key_I, Qt.Key_N,
     })
 
     def _handle_nav_key(self, k: int) -> bool:
@@ -3404,6 +3504,8 @@ class SkeletonCorrector(QMainWindow):
             self._copy_pose("kf")                       # copy prev keyframe -> current
         elif k == Qt.Key_I:
             self.ik_cb.toggle()                         # IK drag mode on/off
+        elif k == Qt.Key_N:
+            self._jump_next_suspect()                   # next QC suspect frame
         else:
             return False
         return True
