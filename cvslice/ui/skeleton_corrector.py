@@ -56,7 +56,7 @@ from cvslice.vision.projection import (
 )
 from cvslice.vision.propagation import (
     SMPL24_PARENTS, enforce_bone_lengths, interpolate_all_joints,
-    interpolate_per_joint,
+    interpolate_per_joint, rigid_extend_hands,
     reference_bone_lengths, smooth_post_process,
 )
 
@@ -420,9 +420,18 @@ class SkeletonCorrector(QMainWindow):
         self.edited_list = QListWidget()
         self.edited_list.setMaximumHeight(160)
         ejl.addWidget(self.edited_list)
+        ej_btn_row = QHBoxLayout()
+        rm_btn = QPushButton("还原选中关节")
+        rm_btn.setToolTip("把选中关节的整条轨迹还原为原始数据,并清除它在所有帧上的"
+                          "关键帧标记(因此清空的关键帧一并移除)。可 Ctrl+Z 撤销。")
+        rm_btn.clicked.connect(self._remove_edited_joint)
+        ej_btn_row.addWidget(rm_btn)
         clr_btn = QPushButton("清空列表")
+        clr_btn.setToolTip("清空编辑标记 + 全部逐关节锚点(姿态不变,但插值不会再"
+                           "动这些关节)。可 Ctrl+Z 撤销。")
         clr_btn.clicked.connect(self._clear_edited)
-        ejl.addWidget(clr_btn)
+        ej_btn_row.addWidget(clr_btn)
+        ejl.addLayout(ej_btn_row)
         rp.addWidget(ej_g)
 
         # Keyframe group: mark corrected frames, interpolate all joints between
@@ -469,10 +478,6 @@ class SkeletonCorrector(QMainWindow):
         self.kf_method.addItems(["spline", "linear"])
         kf_method_row.addWidget(self.kf_method, 1)
         kfl.addLayout(kf_method_row)
-        self.auto_kf_cb = QCheckBox("自动加关键帧")
-        self.auto_kf_cb.setChecked(True)
-        self.auto_kf_cb.setToolTip("编辑某帧后自动把它加为关键帧。")
-        kfl.addWidget(self.auto_kf_cb)
         self.seed_kf_cb = QCheckBox("预填新关键帧")
         self.seed_kf_cb.setToolTip(
             "新建关键帧时用当前插值结果预填,你只需对着预测微调,不必从零摆。")
@@ -557,6 +562,14 @@ class SkeletonCorrector(QMainWindow):
                           "小一点更温和。仅 SMPL-24;有≥2关键帧则只作用其区间。")
         bl_btn.clicked.connect(self._apply_bone_constraint)
         blf.addRow(bl_btn)
+        hands_btn = QPushButton("🖐 一键修复手部 (与小臂共线)")
+        hands_btn.setToolTip(
+            "把左右手(22/23)固定成小臂的刚性延长:手 = 手腕 + 小臂方向 × 恒定手长"
+            "(全段中位手骨长)。整段一次修好,不用一帧帧拖乱飞的手。\n"
+            "注意:修好后如果又插值/平滑改动了手肘或手腕,再点一次即可重新对齐。"
+            "可 Ctrl+Z 撤销。")
+        hands_btn.clicked.connect(self._fix_hands)
+        blf.addRow(hands_btn)
         rp.addWidget(bl_g)
 
         un_g = QGroupBox("撤销")
@@ -1220,6 +1233,14 @@ class SkeletonCorrector(QMainWindow):
         # Old-format progress (keyframes + edited joints, no pins): synthesise
         # pins so it uses the same per-joint interpolation as new data.
         self._retrofit_pins()
+        # INVARIANT: every pinned frame is a visible keyframe. Old saves could
+        # hold pins at frames missing from the keyframe list (hidden anchors
+        # that kept interpolating after the lists looked empty) — surface them.
+        for f in self._kf_joints:
+            if f not in self._keyframes:
+                self._keyframes.append(f)
+        self._keyframes.sort()
+        self._refresh_kf_list()
 
         self.skel_off_spin.blockSignals(True)
         self.skel_off_spin.setValue(self._skel_offset)
@@ -2040,7 +2061,14 @@ class SkeletonCorrector(QMainWindow):
         self.edited_joints.update(moved)
         # Pin the authored joints at this frame: they're now user ground truth.
         # Per-joint interpolation fills only between a joint's own pins.
+        # INVARIANT: a pinned frame is ALWAYS a visible keyframe. Pins hidden
+        # from the keyframe list kept anchoring interpolation after the lists
+        # looked empty — every pin-creating path must add the keyframe too.
         self._kf_joints.setdefault(pidx, set()).update(moved)
+        if pidx not in self._keyframes:
+            self._keyframes.append(pidx)
+            self._keyframes.sort()
+            self._refresh_kf_list()
         self._show_frame()
 
     def _on_release(self, side: str, x: int, y: int) -> None:
@@ -2057,10 +2085,9 @@ class SkeletonCorrector(QMainWindow):
         if was_drag:
             self._refresh_edited_list()
             self._update_undo_lbl()
-            msg = f"关节 {joint} 已更新"
-            if self.auto_kf_cb.isChecked() and self._auto_add_keyframe():
-                msg += f"  |  已自动添加关键帧 skel {self._v2p(self.cur_frame)}"
-            self.statusBar().showMessage(msg)
+            # The keyframe was already added by the pin invariant in _on_move.
+            self.statusBar().showMessage(
+                f"关节 {joint} 已更新  |  关键帧 skel {self._v2p(self.cur_frame)}")
         else:
             # Click WITHOUT drag = anchor this joint at the current frame with
             # its current pose (no value change). Pin good original frames just
@@ -2834,10 +2861,72 @@ class SkeletonCorrector(QMainWindow):
                    "① 需再加1关键帧" if c == 1 else "—")
             self.edited_list.addItem(f"joint {j}   [{c} 关键帧]  {tag}")
 
-    def _clear_edited(self) -> None:
-        self.edited_joints.clear()
+    def _edited_list_joint(self) -> int | None:
+        """Joint index of the selected row in the edited-joints list."""
+        item = self.edited_list.currentItem()
+        if item is None:
+            return None
+        try:
+            return int(item.text().split()[1])
+        except (IndexError, ValueError):
+            return None
+
+    def _remove_edited_joint(self) -> None:
+        """Revert the selected joint: restore its ENTIRE trajectory to the
+        as-loaded source, remove every pin it has (all frames), drop keyframes
+        left with no pinned joints, and unmark it as edited. Undoable."""
+        j = self._edited_list_joint()
+        if j is None:
+            self.statusBar().showMessage("先在列表中选中一个关节。")
+            return
+        if self.pts3d is None:
+            return
+        self._push_undo()
+        # Restore this joint's values everywhere from the pristine source.
+        if (self.pts3d_orig is not None
+                and self.pts3d_orig.shape == self.pts3d.shape
+                and j < self.pts3d.shape[1]):
+            self.pts3d[:, j] = self.pts3d_orig[:, j]
+        # Remove all its pins; a keyframe whose pin set empties is removed too
+        # (bare keyframes that never had pins are kept).
+        emptied = []
+        for f in list(self._kf_joints):
+            js = self._kf_joints[f]
+            js.discard(int(j))
+            if not js:
+                self._kf_joints.pop(f, None)
+                emptied.append(f)
+        for f in emptied:
+            if f in self._keyframes:
+                self._keyframes.remove(f)
+        self.edited_joints.discard(int(j))
+        self._refresh_kf_list()
         self._refresh_edited_list()
-        self.statusBar().showMessage("已编辑关节列表已清空 (不影响已做的修改)")
+        self._show_frame()
+        self.statusBar().showMessage(
+            f"关节 {j} 已还原为原始轨迹,并清除其全部关键帧标记"
+            f"({len(emptied)} 个关键帧因此清空移除)。可 Ctrl+Z 撤销。")
+
+    def _clear_edited(self) -> None:
+        """Clear the edited list AND all per-joint pins so nothing keeps
+        interpolating invisibly. Poses stay as-is (use 还原选中 / 一键还原 to
+        revert values). Undoable."""
+        if not self.edited_joints and not self._kf_joints:
+            self.statusBar().showMessage("没有已编辑关节/锚点可清空。")
+            return
+        self._push_undo()
+        self.edited_joints.clear()
+        # Pins gone -> pin-backed keyframes go with them (invariant: the lists
+        # never look empty while hidden anchors still drive interpolation).
+        for f in list(self._kf_joints):
+            self._kf_joints.pop(f, None)
+            if f in self._keyframes:
+                self._keyframes.remove(f)
+        self._refresh_kf_list()
+        self._refresh_edited_list()
+        self.statusBar().showMessage(
+            "已清空:编辑标记 + 全部逐关节锚点(骨骼姿态未改;插值不会再动这些关节)。"
+            "可 Ctrl+Z 撤销。")
 
     def _on_mode_changed(self, _state: int) -> None:
         if self.mode_all.isChecked():
@@ -2983,6 +3072,24 @@ class SkeletonCorrector(QMainWindow):
             f"已对 skel[{fa}..{fb}] 按中位骨长(强度 {strength:g})约束。\n"
             "保持了关节朝向,只改骨长;不满意可撤销。")
 
+    def _fix_hands(self) -> None:
+        """One-click rigid hands: lock L/R hand (22/23) onto the forearm line at
+        a constant (median) hand length, over the whole clip. Undoable."""
+        if self.pts3d is None:
+            return
+        if self.pts3d.shape[1] != 24:
+            QMessageBox.information(self, "修复手部",
+                                    "当前骨架不是 SMPL-24,暂不支持。")
+            return
+        self._push_undo()
+        self.pts3d, n = rigid_extend_hands(self.pts3d)
+        self._show_frame()
+        QMessageBox.information(
+            self, "修复手部完成",
+            f"已把左右手固定为小臂的刚性延长(共线、恒定手长),"
+            f"整段共调整 {n} 处。\n之后若再插值/平滑改动了手肘或手腕,"
+            f"重按一次即可重新对齐;可 Ctrl+Z 撤销。")
+
     def _seed_keyframe(self, pidx: int) -> bool:
         """Pre-fill frame *pidx* with the value interpolated from existing
         keyframes that bracket it, so the new keyframe starts at the smooth
@@ -3005,18 +3112,6 @@ class SkeletonCorrector(QMainWindow):
                 continue
             for d in range(3):
                 self.pts3d[pidx, j, d] = np.interp(pidx, knot, vals[:, d])
-        return True
-
-    def _auto_add_keyframe(self) -> bool:
-        """Add the current frame as a keyframe quietly. Returns True if added."""
-        if self.pts3d is None:
-            return False
-        pidx = self._v2p(self.cur_frame)
-        if pidx in self._keyframes:
-            return False
-        self._keyframes.append(pidx)
-        self._keyframes.sort()
-        self._refresh_kf_list()
         return True
 
     def _del_keyframe(self) -> None:
