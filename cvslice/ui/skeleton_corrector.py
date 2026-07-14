@@ -996,15 +996,28 @@ class SkeletonCorrector(QMainWindow):
         """
         sources = self._build_sources(act)
         by_key = {s.key: s for s in sources}
+
+        def try_load(s):
+            # A corrupt/odd-encoding file must degrade to "source unavailable"
+            # (warning + fallback), never kill the app — this runs at STARTUP
+            # via the auto-reopened folder.
+            try:
+                return s.load()
+            except Exception as e:
+                print(f"[corrector] source '{s.key}' failed for "
+                      f"{act.get('tag')}: {type(e).__name__}: {e}",
+                      file=sys.stderr)
+                return None, None, 0.0
+
         src = by_key.get(source)
         if src is not None:
-            pts, was_nan, fps = src.load()
+            pts, was_nan, fps = try_load(src)
             if pts is not None:
                 self._source = src
                 return pts, was_nan, fps, src.key
         fallback = by_key.get("csv") or (sources[0] if sources else None)
-        if fallback is not None:
-            pts, was_nan, fps = fallback.load()
+        if fallback is not None and fallback is not src:
+            pts, was_nan, fps = try_load(fallback)
             if pts is not None:
                 self._source = fallback
                 return pts, was_nan, fps, fallback.key

@@ -127,7 +127,7 @@ def load_csv_as_pts3d(csv_path: str) -> tuple[np.ndarray | None, np.ndarray | No
     # Read CSV header to extract frame rate
     fps = 240.0  # default
     try:
-        with open(csv_path, "r") as f:
+        with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
             first_line = f.readline()
             if "Export Frame Rate" in first_line:
                 parts = first_line.split(",")
@@ -141,8 +141,18 @@ def load_csv_as_pts3d(csv_path: str) -> tuple[np.ndarray | None, np.ndarray | No
     except:
         pass
 
-
-    df = pd.read_csv(csv_path)
+    # Exported CSVs are not always UTF-8 (e.g. a GBK degree sign 0xb0 in a
+    # header cell crashed the app at startup). Try common encodings; latin-1
+    # last — it maps every byte, and only the numeric cells matter anyway.
+    df = None
+    for enc in ("utf-8", "utf-8-sig", "gbk", "latin-1"):
+        try:
+            df = pd.read_csv(csv_path, encoding=enc)
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    if df is None:
+        return None, None, None, fps
     df = df.apply(pd.to_numeric, errors="coerce")
     nc = df.shape[1]
     if nc % 3 != 0:
