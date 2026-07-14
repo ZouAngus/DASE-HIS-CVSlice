@@ -632,6 +632,17 @@ class SkeletonCorrector(QMainWindow):
 
     # ----------------------------------------------------------------- IO
 
+    def _warn(self, title: str, msg: str) -> None:
+        """Warning that is SAFE during startup: a modal QMessageBox before the
+        window is shown crashes the offscreen platform and popup-storms real
+        startups (auto-reopened folder with a bad file). Modal only once the
+        window is visible; otherwise status bar + stderr."""
+        if self.isVisible():
+            QMessageBox.warning(self, title, msg)
+        else:
+            print(f"[corrector] {title}: {msg}", file=sys.stderr)
+            self.statusBar().showMessage(f"{title}: {msg}")
+
     def _parse_actions(self, folder: str) -> list[dict]:
         """Parse exported folder into a list of action entries.
 
@@ -642,7 +653,11 @@ class SkeletonCorrector(QMainWindow):
         We group by the CSV stem (without extension) as the action tag,
         then find matching videos for each action.
         """
-        csvs = sorted(f for f in os.listdir(folder) if f.lower().endswith(".csv"))
+        # Skip hidden/metadata junk: macOS AppleDouble companions ("._foo.csv",
+        # binary — one of these crashed startup as an unreadable "CSV") and any
+        # other dot-file a USB drive picked up.
+        csvs = sorted(f for f in os.listdir(folder)
+                      if f.lower().endswith(".csv") and not f.startswith("."))
         actions: list[dict] = []
         for csv_fn in csvs:
             tag = os.path.splitext(csv_fn)[0]  # e.g. "15-boss-walking_clockwise-rep1"
@@ -654,7 +669,7 @@ class SkeletonCorrector(QMainWindow):
             # So we look for mp4 files that contain the action+rep part
             vids: dict[str, str] = {}
             for fn in sorted(os.listdir(folder)):
-                if not fn.lower().endswith(".mp4"):
+                if not fn.lower().endswith(".mp4") or fn.startswith("."):
                     continue
                 low = fn.lower()
                 for cn in CAMERA_NAMES:
@@ -685,8 +700,8 @@ class SkeletonCorrector(QMainWindow):
         index: dict[str, str] = {}
         for root, _dirs, files in os.walk(mosh_dir):
             for fn in files:
-                if not fn.lower().endswith(".pkl"):
-                    continue
+                if not fn.lower().endswith(".pkl") or fn.startswith("."):
+                    continue    # skip AppleDouble/hidden junk ("._x.pkl")
                 stem = os.path.splitext(fn)[0]
                 stem = re.sub(r"_stage(i|ii)$", "", stem, flags=re.IGNORECASE)
                 index.setdefault(stem, os.path.join(root, fn))
@@ -771,8 +786,8 @@ class SkeletonCorrector(QMainWindow):
 
         scenes = self._discover_scenes(folder)
         if not scenes:
-            QMessageBox.warning(
-                self, tr('错误'),
+            self._warn(
+                tr('错误'),
                 tr('未找到场景子文件夹。\n演员文件夹内每个场景子文件夹应包含 calibration/ 和 CSV 文件。'))
             return
 
@@ -817,12 +832,12 @@ class SkeletonCorrector(QMainWindow):
         cal_dir = os.path.join(folder, "calibration")
         calibs = load_all_calibrations(cal_dir) if os.path.isdir(cal_dir) else {}
         if not calibs:
-            QMessageBox.warning(self, tr('警告'),
-                                tr("场景 '{}' 未找到 calibration/ 或解析失败。").format(scene['name']))
+            self._warn(tr('警告'),
+                       tr("场景 '{}' 未找到 calibration/ 或解析失败。").format(scene['name']))
             return
         actions = self._parse_actions(folder)
         if not actions:
-            QMessageBox.warning(self, tr('错误'), tr("场景 '{}' 内没有 .csv 文件").format(scene['name']))
+            self._warn(tr('错误'), tr("场景 '{}' 内没有 .csv 文件").format(scene['name']))
             return
 
         # Release old caps / caches when switching scenes.
@@ -1091,7 +1106,7 @@ class SkeletonCorrector(QMainWindow):
 
         pts3d, was_nan, fps, used = self._load_skeleton(act, self._skel_source)
         if pts3d is None:
-            QMessageBox.warning(self, tr('错误'), tr('骨骼加载失败: {}').format(act['tag']))
+            self._warn(tr('错误'), tr('骨骼加载失败: {}').format(act['tag']))
             return
         self._skel_source = used
 
