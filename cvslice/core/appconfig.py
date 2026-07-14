@@ -27,6 +27,23 @@ def get_dir(key: str) -> str | None:
     return d if isinstance(d, str) and os.path.isdir(d) else None
 
 
+def get_str(key: str, default: str = "") -> str:
+    """Return a plain string setting (no existence check), or *default*."""
+    v = _load().get(key)
+    return v if isinstance(v, str) else default
+
+
+def set_str(key: str, value: str) -> None:
+    """Persist a plain string setting."""
+    try:
+        cfg = _load()
+        cfg[key] = value
+        with open(_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def set_dir(key: str, path: str) -> None:
     """Persist *path* as the last directory for *key*."""
     if not path:

@@ -34,7 +34,7 @@ from PyQt5.QtWidgets import (
     QAbstractSpinBox, QAction, QApplication, QCheckBox, QComboBox, QDialog,
     QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QMainWindow, QMessageBox, QPlainTextEdit,
+    QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QProgressDialog, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
     QVBoxLayout, QWidget,
 )
@@ -50,6 +50,8 @@ from cvslice.vision.adjustment import (
     compute_ray, extract_R_t, find_nearest_joint, get_camera_depth,
     triangulate_two_rays, unproject_2d_to_3d,
 )
+from cvslice.ui import i18n
+from cvslice.ui.i18n import tr
 from cvslice.vision import camera_guided, ik, multiview, pose2d
 from cvslice.vision.projection import (
     clear_projection_cache, draw_skel_with_confidence, project_pts,
@@ -70,7 +72,7 @@ class SkeletonCorrector(QMainWindow):
     # ------------------------------------------------------------------ init
     def __init__(self, folder: str | None = None):
         super().__init__()
-        self.setWindowTitle("CVSlice — 骨骼矫正器 (Skeleton Corrector)")
+        self.setWindowTitle(tr('CVSlice — 骨骼矫正器 (Skeleton Corrector)'))
         self.resize(1400, 950)
 
         # Data state
@@ -227,50 +229,57 @@ class SkeletonCorrector(QMainWindow):
     # ------------------------------------------------------------------ UI
     def _build_ui(self) -> None:
         mb = self.menuBar()
-        fm = mb.addMenu("文件")
-        a_open = QAction("打开演员/导出目录...", self)
+        # Language toggle in the menu-bar corner. Shows the language you'd
+        # SWITCH TO; static texts flip instantly, dynamic ones on next refresh.
+        self._lang_btn = QPushButton("EN" if i18n.get_lang() == "zh" else "中文")
+        self._lang_btn.setFixedWidth(48)
+        self._lang_btn.setToolTip("切换界面语言 / Switch UI language")
+        self._lang_btn.clicked.connect(self._toggle_language)
+        mb.setCornerWidget(self._lang_btn)
+        fm = mb.addMenu(tr('文件'))
+        a_open = QAction(tr('打开演员/导出目录...'), self)
         a_open.setShortcut(QKeySequence("Ctrl+O"))
         a_open.triggered.connect(lambda: self._open_folder())
         fm.addAction(a_open)
-        a_mosh = QAction("关联 mosh 目录...", self)
+        a_mosh = QAction(tr('关联 mosh 目录...'), self)
         a_mosh.triggered.connect(lambda: self._choose_mosh_dir())
         fm.addAction(a_mosh)
         fm.addSeparator()
-        a_save = QAction("保存编辑结果 (PKL/CSV)", self)
+        a_save = QAction(tr('保存编辑结果 (PKL/CSV)'), self)
         a_save.setShortcut(QKeySequence("Ctrl+S"))
         a_save.triggered.connect(self._save)
         fm.addAction(a_save)
-        a_save_all = QAction("保存全部已编辑动作", self)
+        a_save_all = QAction(tr('保存全部已编辑动作'), self)
         a_save_all.setShortcut(QKeySequence("Ctrl+Shift+A"))
         a_save_all.triggered.connect(self._save_all)
         fm.addAction(a_save_all)
-        a_save_prog = QAction("保存进度 (JSON)", self)
+        a_save_prog = QAction(tr('保存进度 (JSON)'), self)
         a_save_prog.setShortcut(QKeySequence("Ctrl+Shift+S"))
         a_save_prog.triggered.connect(self._save_progress)
         fm.addAction(a_save_prog)
         fm.addSeparator()
-        a_exit = QAction("退出", self)
+        a_exit = QAction(tr('退出'), self)
         a_exit.setShortcut(QKeySequence("Ctrl+Q"))
         a_exit.triggered.connect(self.close)
         fm.addAction(a_exit)
 
-        em = mb.addMenu("编辑")
-        a_undo = QAction("撤销", self)
+        em = mb.addMenu(tr('编辑'))
+        a_undo = QAction(tr('撤销'), self)
         a_undo.setShortcut(QKeySequence("Ctrl+Z"))
         a_undo.triggered.connect(self._undo)
         em.addAction(a_undo)
-        a_reset = QAction("恢复到加载时", self)
+        a_reset = QAction(tr('恢复到加载时'), self)
         a_reset.triggered.connect(self._reset_all)
         em.addAction(a_reset)
 
-        tm = mb.addMenu("工具")
-        a_report = QAction("标定体检报告...", self)
+        tm = mb.addMenu(tr('工具'))
+        a_report = QAction(tr('标定体检报告...'), self)
         a_report.triggered.connect(self._calib_report)
         tm.addAction(a_report)
-        a_consist = QAction("双视角一致性检查 (自动)...", self)
+        a_consist = QAction(tr('双视角一致性检查 (自动)...'), self)
         a_consist.triggered.connect(self._consistency_check)
         tm.addAction(a_consist)
-        a_iklen = QAction("IK 骨长设置...", self)
+        a_iklen = QAction(tr('IK 骨长设置...'), self)
         a_iklen.triggered.connect(self._ik_len_dialog)
         tm.addAction(a_iklen)
 
@@ -291,28 +300,26 @@ class SkeletonCorrector(QMainWindow):
         lp = QVBoxLayout(left)
         lp.setContentsMargins(0, 0, 0, 0)
 
-        sel_g = QGroupBox("选择")
+        sel_g = QGroupBox(tr('选择'))
         selform = QFormLayout(sel_g)
         self.scene_combo = QComboBox()
         self.scene_combo.currentIndexChanged.connect(self._on_scene_changed)
-        selform.addRow("场景:", self.scene_combo)
+        selform.addRow(tr('场景:'), self.scene_combo)
         self.source_combo = QComboBox()
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
-        selform.addRow("数据源:", self.source_combo)
+        selform.addRow(tr('数据源:'), self.source_combo)
         self.cam_top_combo = QComboBox()
         self.cam_top_combo.currentTextChanged.connect(self._on_cam_changed)
-        selform.addRow("上视图:", self.cam_top_combo)
+        selform.addRow(tr('上视图:'), self.cam_top_combo)
         self.cam_bot_combo = QComboBox()
         self.cam_bot_combo.currentTextChanged.connect(self._on_cam_changed)
-        selform.addRow("下视图:", self.cam_bot_combo)
+        selform.addRow(tr('下视图:'), self.cam_bot_combo)
         lp.addWidget(sel_g)
 
-        lp.addWidget(QLabel("动作 (双击/方向键切换, W/S 上下一个):"))
-        self.qc_sort_cb = QCheckBox("按 QC 分排序 (最差先)")
+        lp.addWidget(QLabel(tr('动作 (双击/方向键切换, W/S 上下一个):')))
+        self.qc_sort_cb = QCheckBox(tr('按 QC 分排序 (最差先)'))
         self.qc_sort_cb.setToolTip(
-            "读取场景文件夹里的 qc_report.json (由 tools/qc_scan.py 生成),\n"
-            "把动作按质量分从差到好排序,并在名字前显示分数。\n"
-            "没有报告时此选项无效果。N 键 = 跳到下一个可疑帧。")
+            tr('读取场景文件夹里的 qc_report.json (由 tools/qc_scan.py 生成),\n把动作按质量分从差到好排序,并在名字前显示分数。\n没有报告时此选项无效果。N 键 = 跳到下一个可疑帧。'))
         self.qc_sort_cb.toggled.connect(self._on_qc_sort_toggled)
         lp.addWidget(self.qc_sort_cb)
         self.action_list = QListWidget()
@@ -353,7 +360,7 @@ class SkeletonCorrector(QMainWindow):
         pb_row.addWidget(self.prev_btn)
         pb_row.addWidget(self.play_btn)
         pb_row.addWidget(self.next_btn)
-        self.loop_cb = QCheckBox("循环")
+        self.loop_cb = QCheckBox(tr('循环'))
         self.loop_cb.setChecked(True)
         pb_row.addWidget(self.loop_cb)
         self.slider = QSlider(Qt.Horizontal)
@@ -371,100 +378,81 @@ class SkeletonCorrector(QMainWindow):
         rp = QVBoxLayout(right_inner)
 
         # Compact mode panel: long explanations live in tooltips, not labels.
-        mode_g = QGroupBox("关节模式")
+        mode_g = QGroupBox(tr('关节模式'))
         mode_g.setToolTip(
-            "拖动关节 = 修改位置;点击关节(不拖)= 用当前姿态把它锚定/"
-            "取消锚定到当前帧(好的原始帧就这样钉)。")
+            tr('拖动关节 = 修改位置;点击关节(不拖)= 用当前姿态把它锚定/取消锚定到当前帧(好的原始帧就这样钉)。'))
         mg = QVBoxLayout(mode_g)
-        self.mode_all = QCheckBox("编辑所有关节 (All)")
+        self.mode_all = QCheckBox(tr('编辑所有关节 (All)'))
         self.mode_all.setChecked(True)
         self.mode_all.setToolTip(
-            "取消勾选 → 单关节模式:点击选中后只能拖动该关节。\n"
-            "点击关节(不拖)= 锚定/取消锚定到当前帧。")
+            tr('取消勾选 → 单关节模式:点击选中后只能拖动该关节。\n点击关节(不拖)= 锚定/取消锚定到当前帧。'))
         self.mode_all.stateChanged.connect(self._on_mode_changed)
         mg.addWidget(self.mode_all)
-        self.sel_joint_lbl = QLabel("选中关节: -")
+        self.sel_joint_lbl = QLabel(tr('选中关节: -'))
         mg.addWidget(self.sel_joint_lbl)
-        self.two_view_cb = QCheckBox("双视角三角化拖拽")
+        self.two_view_cb = QCheckBox(tr('双视角三角化拖拽'))
         self.two_view_cb.setChecked(True)
         self.two_view_cb.setToolTip(
-            "在上、下视图分别拖同一关节,两视角射线三角化出精确 3D 深度"
-            "(不用猜远近)。拖了一个视图后,另一视图画出该关节的极线作引导,"
-            "沿极线放一下即可。")
+            tr('在上、下视图分别拖同一关节,两视角射线三角化出精确 3D 深度(不用猜远近)。拖了一个视图后,另一视图画出该关节的极线作引导,沿极线放一下即可。'))
         mg.addWidget(self.two_view_cb)
-        self.ik_cb = QCheckBox("🦾 IK 拖动 (I)")
+        self.ik_cb = QCheckBox(tr('🦾 IK 拖动 (I)'))
         self.ik_cb.setChecked(True)
         self.ik_cb.setToolTip(
-            "两骨 IK 模式,规则固定无歧义:\n"
-            "• 腕/踝 → 整肢求解:肩/髋不动,肘/膝自动落位,骨长锁定为本片段"
-            "中位数;超出可及范围 → 完全伸直并钳制(直臂绝不折弯)。\n"
-            "• 肘/膝 → 只在骨长允许的圆弧(黄圈)上滑动 = 调摆向。\n"
-            "• 肩/髋 → 整肢刚性平移;骨盆 → 整个骨架平移;\n"
-            "  脊柱/颈/锁骨 → 关节+子树平移;手/脚/头 → 绕父关节球面滑动。\n"
-            "• 骨长可在「工具 ▸ IK 骨长设置...」查看/覆盖。\n"
-            "• 与『双视角三角化拖拽』兼容:目标点按原逻辑取得后再做 IK。")
+            tr('两骨 IK 模式,规则固定无歧义:\n• 腕/踝 → 整肢求解:肩/髋不动,肘/膝自动落位,骨长锁定为本片段中位数;超出可及范围 → 完全伸直并钳制(直臂绝不折弯)。\n• 肘/膝 → 只在骨长允许的圆弧(黄圈)上滑动 = 调摆向。\n• 肩/髋 → 整肢刚性平移;骨盆 → 整个骨架平移;\n  脊柱/颈/锁骨 → 关节+子树平移;手/脚/头 → 绕父关节球面滑动。\n• 骨长可在「工具 ▸ IK 骨长设置...」查看/覆盖。\n• 与『双视角三角化拖拽』兼容:目标点按原逻辑取得后再做 IK。'))
         self.ik_cb.toggled.connect(
             lambda on: self.statusBar().showMessage(
-                "IK 拖动已开启: 拖腕/踝=整肢求解, 拖肘/膝=圆弧调摆向"
-                if on else "IK 拖动已关闭: 恢复普通单关节拖动"))
+                tr('IK 拖动已开启: 拖腕/踝=整肢求解, 拖肘/膝=圆弧调摆向')
+                if on else tr('IK 拖动已关闭: 恢复普通单关节拖动')))
         mg.addWidget(self.ik_cb)
         rp.addWidget(mode_g)
 
-        ej_g = QGroupBox("已编辑关节 / 关键帧数")
-        ej_g.setToolTip("视图中关节号配色:绿=≥2关键帧(会插值) "
-                        "橙=仅1帧(不插,需再加) 灰=未编辑;品红点=本帧标注")
+        ej_g = QGroupBox(tr('已编辑关节 / 关键帧数'))
+        ej_g.setToolTip(tr('视图中关节号配色:绿=≥2关键帧(会插值) 橙=仅1帧(不插,需再加) 灰=未编辑;品红点=本帧标注'))
         ejl = QVBoxLayout(ej_g)
-        ej_legend = QLabel("绿≥2帧 橙=1 灰=无 | 品红点=本帧")
+        ej_legend = QLabel(tr('绿≥2帧 橙=1 灰=无 | 品红点=本帧'))
         ej_legend.setStyleSheet("color:#888; font-size:11px;")
         ejl.addWidget(ej_legend)
         self.edited_list = QListWidget()
         self.edited_list.setMaximumHeight(160)
         ejl.addWidget(self.edited_list)
         ej_btn_row = QHBoxLayout()
-        rm_btn = QPushButton("还原选中关节")
-        rm_btn.setToolTip("把选中关节的整条轨迹还原为原始数据,并清除它在所有帧上的"
-                          "关键帧标记(因此清空的关键帧一并移除)。可 Ctrl+Z 撤销。")
+        rm_btn = QPushButton(tr('还原选中关节'))
+        rm_btn.setToolTip(tr('把选中关节的整条轨迹还原为原始数据,并清除它在所有帧上的关键帧标记(因此清空的关键帧一并移除)。可 Ctrl+Z 撤销。'))
         rm_btn.clicked.connect(self._remove_edited_joint)
         ej_btn_row.addWidget(rm_btn)
-        clr_btn = QPushButton("清空列表")
-        clr_btn.setToolTip("清空编辑标记 + 全部逐关节锚点(姿态不变,但插值不会再"
-                           "动这些关节)。可 Ctrl+Z 撤销。")
+        clr_btn = QPushButton(tr('清空列表'))
+        clr_btn.setToolTip(tr('清空编辑标记 + 全部逐关节锚点(姿态不变,但插值不会再动这些关节)。可 Ctrl+Z 撤销。'))
         clr_btn.clicked.connect(self._clear_edited)
         ej_btn_row.addWidget(clr_btn)
         ejl.addLayout(ej_btn_row)
         rp.addWidget(ej_g)
 
         # Keyframe group: mark corrected frames, interpolate all joints between
-        kf_g = QGroupBox("关键帧 (Keyframe)")
+        kf_g = QGroupBox(tr('关键帧 (Keyframe)'))
         kfl = QVBoxLayout(kf_g)
         kf_btn_row = QHBoxLayout()
-        add_kf_btn = QPushButton("添加关键帧 (K)")
+        add_kf_btn = QPushButton(tr('添加关键帧 (K)'))
         add_kf_btn.setToolTip(
-            "把当前帧设为关键帧,并用『当前姿态』锚定你正在修正的关节(无需拖动)。\n"
-            "用法:某关节拖好一次后,在每个『原始姿态已正确』的帧上按 K,就能把它"
-            "钉在那些好帧上 —— 插值会穿过它们。往复动作(跑/摆)多打几个尤其有用。")
+            tr('把当前帧设为关键帧,并用『当前姿态』锚定你正在修正的关节(无需拖动)。\n用法:某关节拖好一次后,在每个『原始姿态已正确』的帧上按 K,就能把它钉在那些好帧上 —— 插值会穿过它们。往复动作(跑/摆)多打几个尤其有用。'))
         add_kf_btn.clicked.connect(self._add_keyframe)
         kf_btn_row.addWidget(add_kf_btn)
-        del_kf_btn = QPushButton("删除")
+        del_kf_btn = QPushButton(tr('删除'))
         del_kf_btn.clicked.connect(self._del_keyframe)
         kf_btn_row.addWidget(del_kf_btn)
-        clear_kf_btn = QPushButton("清空全部")
-        clear_kf_btn.setToolTip("一键删除所有关键帧及其逐关节标记。\n"
-                                "不影响已调整的骨架姿态,只是清掉关键帧,可重新标。")
+        clear_kf_btn = QPushButton(tr('清空全部'))
+        clear_kf_btn.setToolTip(tr('一键删除所有关键帧及其逐关节标记。\n不影响已调整的骨架姿态,只是清掉关键帧,可重新标。'))
         clear_kf_btn.clicked.connect(self._clear_all_keyframes)
         kf_btn_row.addWidget(clear_kf_btn)
         kfl.addLayout(kf_btn_row)
         # Seed the current frame from a known-good earlier pose when the current
         # one is wrecked, then fine-tune.
         copy_row = QHBoxLayout()
-        cp_f_btn = QPushButton("⤵ 复制上一帧 (F)")
-        cp_f_btn.setToolTip("把上一视频帧的骨骼复制到当前帧并设为关键帧,再微调。"
-                            "当前帧整骨架崩了、但前一帧正常时,一键拿到好起点。")
+        cp_f_btn = QPushButton(tr('⤵ 复制上一帧 (F)'))
+        cp_f_btn.setToolTip(tr('把上一视频帧的骨骼复制到当前帧并设为关键帧,再微调。当前帧整骨架崩了、但前一帧正常时,一键拿到好起点。'))
         cp_f_btn.clicked.connect(lambda: self._copy_pose("frame"))
         copy_row.addWidget(cp_f_btn)
-        cp_k_btn = QPushButton("⤵ 复制上一关键帧 (G)")
-        cp_k_btn.setToolTip("把上一个关键帧(已确认的好姿态)复制到当前帧并设为关键帧,"
-                            "再微调。前一帧也坏、但更早有好关键帧时用。")
+        cp_k_btn = QPushButton(tr('⤵ 复制上一关键帧 (G)'))
+        cp_k_btn.setToolTip(tr('把上一个关键帧(已确认的好姿态)复制到当前帧并设为关键帧,再微调。前一帧也坏、但更早有好关键帧时用。'))
         cp_k_btn.clicked.connect(lambda: self._copy_pose("kf"))
         copy_row.addWidget(cp_k_btn)
         kfl.addLayout(copy_row)
@@ -473,133 +461,111 @@ class SkeletonCorrector(QMainWindow):
         self.kf_list.itemClicked.connect(self._on_kf_clicked)
         kfl.addWidget(self.kf_list)
         kf_method_row = QHBoxLayout()
-        kf_method_row.addWidget(QLabel("插值:"))
+        kf_method_row.addWidget(QLabel(tr('插值:')))
         self.kf_method = QComboBox()
         self.kf_method.addItems(["spline", "linear"])
         kf_method_row.addWidget(self.kf_method, 1)
         kfl.addLayout(kf_method_row)
-        self.seed_kf_cb = QCheckBox("预填新关键帧")
+        self.seed_kf_cb = QCheckBox(tr('预填新关键帧'))
         self.seed_kf_cb.setToolTip(
-            "新建关键帧时用当前插值结果预填,你只需对着预测微调,不必从零摆。")
+            tr('新建关键帧时用当前插值结果预填,你只需对着预测微调,不必从零摆。'))
         kfl.addWidget(self.seed_kf_cb)
-        self.onion_cb = QCheckBox("洋葱皮残影")
+        self.onion_cb = QCheckBox(tr('洋葱皮残影'))
         self.onion_cb.setChecked(True)
-        self.onion_cb.setToolTip("显示前/后关键帧的淡色残影(含关节点),便于对位。")
+        self.onion_cb.setToolTip(tr('显示前/后关键帧的淡色残影(含关节点),便于对位。'))
         self.onion_cb.toggled.connect(lambda _=False: self._show_frame())
         kfl.addWidget(self.onion_cb)
         smooth_row = QHBoxLayout()
-        smooth_row.addWidget(QLabel("软平滑:"))
+        smooth_row.addWidget(QLabel(tr('软平滑:')))
         self.kf_smooth = QDoubleSpinBox()
         self.kf_smooth.setRange(0.0, 8.0)
         self.kf_smooth.setSingleStep(0.5)
         self.kf_smooth.setValue(0.0)
         self.kf_smooth.setToolTip(
-            "软关键帧平滑(σ,帧)。默认 0 = 自动:按关键帧间距自动软化,把手标"
-            "关键帧的微小不一致(=抖动来源)平均掉,曲线落在关键帧附近而非硬穿过。"
-            ">0 = 在自动基础上再加强;想更贴合手标位置就调小/设很小的值。")
+            tr('软关键帧平滑(σ,帧)。默认 0 = 自动:按关键帧间距自动软化,把手标关键帧的微小不一致(=抖动来源)平均掉,曲线落在关键帧附近而非硬穿过。>0 = 在自动基础上再加强;想更贴合手标位置就调小/设很小的值。'))
         smooth_row.addWidget(self.kf_smooth, 1)
         kfl.addLayout(smooth_row)
-        self.replace_mode_cb = QCheckBox("关键帧间走直线 (replace,丢弃原始运动)")
+        self.replace_mode_cb = QCheckBox(tr('关键帧间走直线 (replace,丢弃原始运动)'))
         self.replace_mode_cb.setChecked(False)   # default = offset (keeps motion)
         self.replace_mode_cb.setToolTip(
-            "默认(不勾)= offset: 骨架继续跟随原始身体运动(下蹲/跳/走都保留),"
-            "只把你在关键帧上的修正量平滑地叠加上去。适合绝大多数情况,只要少数几个"
-            "关键帧。(实测下蹲:offset 贴合真实运动 ~2-4% 骨长。)\n"
-            "勾上 = replace: 关键帧之间画直线穿过你的关键帧姿态,丢弃中间原始运动。"
-            "只在『某段源数据是坏的、且你把这段的极值都标了关键帧』时用;它会把你"
-            "没标关键帧的运动压平(比如下蹲会被拉成站着不动,中间帧严重错位)。")
+            tr('默认(不勾)= offset: 骨架继续跟随原始身体运动(下蹲/跳/走都保留),只把你在关键帧上的修正量平滑地叠加上去。适合绝大多数情况,只要少数几个关键帧。(实测下蹲:offset 贴合真实运动 ~2-4% 骨长。)\n勾上 = replace: 关键帧之间画直线穿过你的关键帧姿态,丢弃中间原始运动。只在『某段源数据是坏的、且你把这段的极值都标了关键帧』时用;它会把你没标关键帧的运动压平(比如下蹲会被拉成站着不动,中间帧严重错位)。'))
         kfl.addWidget(self.replace_mode_cb)
-        interp_btn = QPushButton("在关键帧间插值 (全关节)")
+        interp_btn = QPushButton(tr('在关键帧间插值 (全关节)'))
         interp_btn.setToolTip(
-            "先在若干帧上修好骨架并各加一个关键帧,再插值。编辑过的关节用关键帧"
-            "重画(去漂浮);**你没拖、但中间帧坏掉的关节(骨长突变/瞬间弹跳)会被"
-            "自动检出并就地修复**,所以点一次基本就修好,不用回头反复检查。其余正常"
-            "关节保留平滑原始运动。关键帧不一致/抖动时调大「软平滑」。")
+            tr('先在若干帧上修好骨架并各加一个关键帧,再插值。编辑过的关节用关键帧重画(去漂浮);**你没拖、但中间帧坏掉的关节(骨长突变/瞬间弹跳)会被自动检出并就地修复**,所以点一次基本就修好,不用回头反复检查。其余正常关节保留平滑原始运动。关键帧不一致/抖动时调大「软平滑」。'))
         interp_btn.clicked.connect(self._interp_keyframes)
         kfl.addWidget(interp_btn)
-        cam_fill_btn = QPushButton("🎥 相机引导填充中间帧")
+        cam_fill_btn = QPushButton(tr('🎥 相机引导填充中间帧'))
         cam_fill_btn.setStyleSheet("font-weight:bold;")
         cam_fill_btn.setToolTip(
-            "用多视角相机修正关键帧之间的骨架,再锚定到你的关键帧(关键帧纹丝不动)。"
-            "相机可靠的是画面内(横向)位置——用它纠正源骨架的横向漂移;深度方向相机"
-            "不可靠(易抖/外扩),故深度保持源骨架不变,避免肢体外翻。相机看不清的"
-            "关节/帧回退到原始,不会更差。边界速度匹配缓入,与前后丝滑衔接。"
-            "需要 2D 姿态模型。")
+            tr('用多视角相机修正关键帧之间的骨架,再锚定到你的关键帧(关键帧纹丝不动)。相机可靠的是画面内(横向)位置——用它纠正源骨架的横向漂移;深度方向相机不可靠(易抖/外扩),故深度保持源骨架不变,避免肢体外翻。相机看不清的关节/帧回退到原始,不会更差。边界速度匹配缓入,与前后丝滑衔接。需要 2D 姿态模型。'))
         cam_fill_btn.clicked.connect(self._camera_guided_fill)
         kfl.addWidget(cam_fill_btn)
         rp.addWidget(kf_g)
 
-        sm_g = QGroupBox("标注后平滑处理")
+        sm_g = QGroupBox(tr('标注后平滑处理'))
         sf = QFormLayout(sm_g)
         self.post_strength = QDoubleSpinBox()
         self.post_strength.setRange(0.2, 5.0)
         self.post_strength.setSingleStep(0.2)
         self.post_strength.setValue(1.0)
-        self.post_strength.setToolTip("越大越平滑(慢处);快速动作始终保留")
-        sf.addRow("平滑强度:", self.post_strength)
-        self.post_despike = QCheckBox("去单帧尖刺(中值)")
+        self.post_strength.setToolTip(tr('越大越平滑(慢处);快速动作始终保留'))
+        sf.addRow(tr('平滑强度:'), self.post_strength)
+        self.post_despike = QCheckBox(tr('去单帧尖刺(中值)'))
         self.post_despike.setChecked(True)
         sf.addRow(self.post_despike)
-        sm_btn = QPushButton("🩹 一键平滑后处理 (已编辑关节)")
+        sm_btn = QPushButton(tr('🩹 一键平滑后处理 (已编辑关节)'))
         sm_btn.setStyleSheet("font-weight:bold;")
-        sm_btn.setToolTip("中值去单帧尖刺 + One-Euro 速度自适应平滑。慢处抖动被压平,"
-                          "快速动作不糊(按速度自动放行)。仅作用已编辑关节;"
-                          "有≥2关键帧则只作用其区间。")
+        sm_btn.setToolTip(tr('中值去单帧尖刺 + One-Euro 速度自适应平滑。慢处抖动被压平,快速动作不糊(按速度自动放行)。仅作用已编辑关节;有≥2关键帧则只作用其区间。'))
         sm_btn.clicked.connect(self._apply_post_smooth)
         sf.addRow(sm_btn)
         rp.addWidget(sm_g)
 
-        bl_g = QGroupBox("骨长约束 (Bone length)")
+        bl_g = QGroupBox(tr('骨长约束 (Bone length)'))
         blf = QFormLayout(bl_g)
         self.bone_strength = QDoubleSpinBox()
         self.bone_strength.setRange(0.0, 1.0)
         self.bone_strength.setSingleStep(0.1)
         self.bone_strength.setValue(1.0)
-        blf.addRow("强度 (0~1):", self.bone_strength)
-        bl_btn = QPushButton("🦴 约束骨长 (整段)")
-        bl_btn.setToolTip("以全段中位骨长为基准,保持关节朝向、把每根骨头拉回该长度"
-                          "(连同其下游一起移动)。专治漂浮关节拉长骨头。强度1=精确,"
-                          "小一点更温和。仅 SMPL-24;有≥2关键帧则只作用其区间。")
+        blf.addRow(tr('强度 (0~1):'), self.bone_strength)
+        bl_btn = QPushButton(tr('🦴 约束骨长 (整段)'))
+        bl_btn.setToolTip(tr('以全段中位骨长为基准,保持关节朝向、把每根骨头拉回该长度(连同其下游一起移动)。专治漂浮关节拉长骨头。强度1=精确,小一点更温和。仅 SMPL-24;有≥2关键帧则只作用其区间。'))
         bl_btn.clicked.connect(self._apply_bone_constraint)
         blf.addRow(bl_btn)
-        hands_btn = QPushButton("🖐 一键修复手部 (与小臂共线)")
+        hands_btn = QPushButton(tr('🖐 一键修复手部 (与小臂共线)'))
         hands_btn.setToolTip(
-            "把左右手(22/23)固定成小臂的刚性延长:手 = 手腕 + 小臂方向 × 恒定手长"
-            "(全段中位手骨长)。整段一次修好,不用一帧帧拖乱飞的手。\n"
-            "注意:修好后如果又插值/平滑改动了手肘或手腕,再点一次即可重新对齐。"
-            "可 Ctrl+Z 撤销。")
+            tr('把左右手(22/23)固定成小臂的刚性延长:手 = 手腕 + 小臂方向 × 恒定手长(全段中位手骨长)。整段一次修好,不用一帧帧拖乱飞的手。\n注意:修好后如果又插值/平滑改动了手肘或手腕,再点一次即可重新对齐。可 Ctrl+Z 撤销。'))
         hands_btn.clicked.connect(self._fix_hands)
         blf.addRow(hands_btn)
         rp.addWidget(bl_g)
 
-        un_g = QGroupBox("撤销")
+        un_g = QGroupBox(tr('撤销'))
         ug = QVBoxLayout(un_g)
-        un_btn = QPushButton("撤销 (Ctrl+Z)")
+        un_btn = QPushButton(tr('撤销 (Ctrl+Z)'))
         un_btn.clicked.connect(self._undo)
         ug.addWidget(un_btn)
-        self.undo_lbl = QLabel("撤销步数: 0")
+        self.undo_lbl = QLabel(tr('撤销步数: 0'))
         ug.addWidget(self.undo_lbl)
-        reset_btn = QPushButton("↺ 一键还原未调整骨骼")
+        reset_btn = QPushButton(tr('↺ 一键还原未调整骨骼'))
         reset_btn.setStyleSheet("font-weight:bold;")
-        reset_btn.setToolTip("把当前动作的骨骼恢复到加载时(未调整)的状态,清空所有"
-                             "编辑/关键帧。可 Ctrl+Z 撤销。")
+        reset_btn.setToolTip(tr('把当前动作的骨骼恢复到加载时(未调整)的状态,清空所有编辑/关键帧。可 Ctrl+Z 撤销。'))
         reset_btn.clicked.connect(self._reset_all)
         ug.addWidget(reset_btn)
         rp.addWidget(un_g)
 
         rp.addStretch()
 
-        save_btn = QPushButton("💾 保存编辑结果 (PKL/CSV)")
+        save_btn = QPushButton(tr('💾 保存编辑结果 (PKL/CSV)'))
         save_btn.setStyleSheet("font-weight:bold; padding:10px;")
         save_btn.clicked.connect(self._save)
         rp.addWidget(save_btn)
 
-        save_all_btn = QPushButton("💾 保存全部已编辑动作")
+        save_all_btn = QPushButton(tr('💾 保存全部已编辑动作'))
         save_all_btn.setStyleSheet("padding:8px;")
         save_all_btn.clicked.connect(self._save_all)
         rp.addWidget(save_all_btn)
 
-        prog_btn = QPushButton("📌 保存进度 (JSON)")
+        prog_btn = QPushButton(tr('📌 保存进度 (JSON)'))
         prog_btn.setStyleSheet("padding:8px;")
         prog_btn.clicked.connect(lambda: self._save_progress())
         rp.addWidget(prog_btn)
@@ -613,33 +579,28 @@ class SkeletonCorrector(QMainWindow):
 
         # Time alignment + calibration refine live at the bottom of the LEFT
         # pane (lp), built here and appended now.
-        vo_g = QGroupBox("时间对齐 (Offset)")
+        vo_g = QGroupBox(tr('时间对齐 (Offset)'))
         vof = QFormLayout(vo_g)
         self.skel_off_spin = QSpinBox()
         self.skel_off_spin.setRange(-self._off_bound, self._off_bound)
         self.skel_off_spin.setValue(0)
         self.skel_off_spin.valueChanged.connect(self._on_skel_offset_changed)
-        vof.addRow("骨骼时间:", self.skel_off_spin)
+        vof.addRow(tr('骨骼时间:'), self.skel_off_spin)
         self.vo_top_spin = QSpinBox()
         self.vo_top_spin.setRange(-self._off_bound, self._off_bound)
         self.vo_top_spin.setValue(0)
         self.vo_top_spin.valueChanged.connect(self._on_view_offset_changed)
-        vof.addRow("上视图:", self.vo_top_spin)
+        vof.addRow(tr('上视图:'), self.vo_top_spin)
         self.vo_bot_spin = QSpinBox()
         self.vo_bot_spin.setRange(-self._off_bound, self._off_bound)
         self.vo_bot_spin.setValue(0)
         self.vo_bot_spin.valueChanged.connect(self._on_view_offset_changed)
-        vof.addRow("下视图:", self.vo_bot_spin)
-        vo_g.setToolTip("骨骼时间: 整体平移骨骼帧对齐视频(范围=整段长度)。\n"
-                        "上/下视图: 各相机微调。\n"
-                        "超出范围的帧会被裁掉。")
-        bake_btn = QPushButton("✂️ 裁切对齐 (pkl + 所有视频, 原地)")
+        vof.addRow(tr('下视图:'), self.vo_bot_spin)
+        vo_g.setToolTip(tr('骨骼时间: 整体平移骨骼帧对齐视频(范围=整段长度)。\n上/下视图: 各相机微调。\n超出范围的帧会被裁掉。'))
+        bake_btn = QPushButton(tr('✂️ 裁切对齐 (pkl + 所有视频, 原地)'))
         bake_btn.setStyleSheet("font-weight:bold;")
         bake_btn.setToolTip(
-            "最终烘焙: 按『最晚开头/最早结尾』的交集窗口(跨所有视角+骨架),把 pkl "
-            "裁切写入 _edited.pkl,并按各视角自己的 offset 原地裁切所有源 MP4 "
-            "(首次自动 .bak 备份),使 pkl 与每个视角逐帧同步。\n"
-            "⚠ 会覆盖源视频(.bak 可恢复),是最终一次性操作。")
+            tr('最终烘焙: 按『最晚开头/最早结尾』的交集窗口(跨所有视角+骨架),把 pkl 裁切写入 _edited.pkl,并按各视角自己的 offset 原地裁切所有源 MP4 (首次自动 .bak 备份),使 pkl 与每个视角逐帧同步。\n⚠ 会覆盖源视频(.bak 可恢复),是最终一次性操作。'))
         bake_btn.clicked.connect(self._trim_align_save)
         vof.addRow(bake_btn)
         lp.addWidget(vo_g)
@@ -659,8 +620,7 @@ class SkeletonCorrector(QMainWindow):
         self._play_timer.timeout.connect(self._tick)
 
         self.statusBar().showMessage(
-            "文件 ▸ 打开文件夹 加载导出目录 | 空格=播放 A/D=帧 W/S=动作 "
-            "K=关键帧 I=IK N=可疑帧 (完整快捷键见 README)")
+            tr('文件 ▸ 打开文件夹 加载导出目录 | 空格=播放 A/D=帧 W/S=动作 K=关键帧 I=IK N=可疑帧 (完整快捷键见 README)'))
 
     # ----------------------------------------------------------------- IO
 
@@ -733,7 +693,7 @@ class SkeletonCorrector(QMainWindow):
     def _choose_mosh_dir(self, mosh_dir: str | None = None) -> None:
         """Pick a MoSh++ output directory and link its pkls to loaded actions."""
         if not mosh_dir:
-            mosh_dir = QFileDialog.getExistingDirectory(self, "选择 mosh 输出目录")
+            mosh_dir = QFileDialog.getExistingDirectory(self, tr('选择 mosh 输出目录'))
         if not mosh_dir or not os.path.isdir(mosh_dir):
             return
         self._mosh_dir = mosh_dir
@@ -741,10 +701,10 @@ class SkeletonCorrector(QMainWindow):
         self._mosh_kind_cache.clear()
         n = self._attach_mosh_pkls(self._actions, mosh_dir) if self._actions else 0
         if not self._actions:
-            QMessageBox.information(self, "mosh", "已记录 mosh 目录，请先打开演员/导出目录。")
+            QMessageBox.information(self, "mosh", tr('已记录 mosh 目录，请先打开演员/导出目录。'))
             return
         QMessageBox.information(
-            self, "mosh", f"已关联 mosh 目录:\n{mosh_dir}\n当前场景匹配到 {n} 个动作的 pkl。")
+            self, "mosh", tr('已关联 mosh 目录:\n{}\n当前场景匹配到 {} 个动作的 pkl。').format(mosh_dir, n))
         # Switch the current action to the SMPL/mosh skeleton (the primary edit
         # target). Set the source explicitly so the reload doesn't fall back to
         # the auto-snapshotted CSV source.
@@ -797,16 +757,15 @@ class SkeletonCorrector(QMainWindow):
 
     def _open_folder(self, folder: str | None = None) -> None:
         if not folder:
-            folder = QFileDialog.getExistingDirectory(self, "选择演员/导出目录")
+            folder = QFileDialog.getExistingDirectory(self, tr('选择演员/导出目录'))
         if not folder or not os.path.isdir(folder):
             return
 
         scenes = self._discover_scenes(folder)
         if not scenes:
             QMessageBox.warning(
-                self, "错误",
-                "未找到场景子文件夹。\n演员文件夹内每个场景子文件夹应包含 "
-                "calibration/ 和 CSV 文件。")
+                self, tr('错误'),
+                tr('未找到场景子文件夹。\n演员文件夹内每个场景子文件夹应包含 calibration/ 和 CSV 文件。'))
             return
 
         self._actor_folder = folder
@@ -821,8 +780,7 @@ class SkeletonCorrector(QMainWindow):
         self._load_scene(0)
 
         self.statusBar().showMessage(
-            f"已加载演员目录: {os.path.basename(os.path.normpath(folder))}  |  "
-            f"{len(scenes)} 个场景")
+            tr('已加载演员目录: {}  |  {} 个场景').format(os.path.basename(os.path.normpath(folder)), len(scenes)))
 
     def _on_scene_changed(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._scenes):
@@ -851,12 +809,12 @@ class SkeletonCorrector(QMainWindow):
         cal_dir = os.path.join(folder, "calibration")
         calibs = load_all_calibrations(cal_dir) if os.path.isdir(cal_dir) else {}
         if not calibs:
-            QMessageBox.warning(self, "警告",
-                                f"场景 '{scene['name']}' 未找到 calibration/ 或解析失败。")
+            QMessageBox.warning(self, tr('警告'),
+                                tr("场景 '{}' 未找到 calibration/ 或解析失败。").format(scene['name']))
             return
         actions = self._parse_actions(folder)
         if not actions:
-            QMessageBox.warning(self, "错误", f"场景 '{scene['name']}' 内没有 .csv 文件")
+            QMessageBox.warning(self, tr('错误'), tr("场景 '{}' 内没有 .csv 文件").format(scene['name']))
             return
 
         # Release old caps / caches when switching scenes.
@@ -885,14 +843,14 @@ class SkeletonCorrector(QMainWindow):
         self._load_action(0)
 
         n_pkl = sum(1 for a in actions if a.get("pkl"))
-        extra = f"  |  {n_pkl} 个含 mosh pkl" if n_pkl else ""
+        extra = tr('  |  {} 个含 mosh pkl').format(n_pkl) if n_pkl else ""
         n_restored = sum(
             1 for a in actions
             if (ep := self._edited_pkl_path(a, "mosh_joints")) and os.path.exists(ep))
-        prog = (f"  |  已恢复 {n_restored} 个动作的编辑骨架(_edited.pkl)"
-                if n_restored else ("  |  已载入进度" if self._progress else ""))
+        prog = (tr('  |  已恢复 {} 个动作的编辑骨架(_edited.pkl)').format(n_restored)
+                if n_restored else (tr('  |  已载入进度') if self._progress else ""))
         self.statusBar().showMessage(
-            f"场景: {scene['name']}  |  {len(actions)} 个动作{extra}{prog}")
+            tr('场景: {}  |  {} 个动作{}{}').format(scene['name'], len(actions), extra, prog))
 
     # ------------------------------------------------------------- QC report
     @staticmethod
@@ -947,7 +905,7 @@ class SkeletonCorrector(QMainWindow):
             return
         if not self._qc and on:
             self.statusBar().showMessage(
-                "本场景没有 qc_report.json —— 先运行 tools/qc_scan.py 生成。")
+                tr('本场景没有 qc_report.json —— 先运行 tools/qc_scan.py 生成。'))
             return
         cur_tag = (self._actions[self._cur_action_idx]["tag"]
                    if 0 <= self._cur_action_idx < len(self._actions) else None)
@@ -973,7 +931,7 @@ class SkeletonCorrector(QMainWindow):
                     if isinstance(r, dict) else set())
         if not suspects:
             self.statusBar().showMessage(
-                "本片段没有 QC 可疑帧记录 (无报告或全段正常)。")
+                tr('本片段没有 QC 可疑帧记录 (无报告或全段正常)。'))
             return
         lo, hi = self._play_lo, self._play_hi
         order = list(range(self.cur_frame + 1, hi + 1)) + \
@@ -983,10 +941,9 @@ class SkeletonCorrector(QMainWindow):
                 self.cur_frame = v
                 self.slider.setValue(v)
                 self.statusBar().showMessage(
-                    f"QC: 跳到可疑帧 video {v} (skel {self._v2p(v)});"
-                    f" 本片段共 {len(suspects)} 个可疑骨架帧。")
+                    tr('QC: 跳到可疑帧 video {} (skel {}); 本片段共 {} 个可疑骨架帧。').format(v, self._v2p(v), len(suspects)))
                 return
-        self.statusBar().showMessage("QC: 可疑帧不在当前可播放范围内。")
+        self.statusBar().showMessage(tr('QC: 可疑帧不在当前可播放范围内。'))
 
     def _on_action_changed(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._actions):
@@ -1096,7 +1053,7 @@ class SkeletonCorrector(QMainWindow):
                 self._write_progress_json()
                 if wrote:
                     self.statusBar().showMessage(
-                        f"已自动保存上一动作的编辑: {out_tag}")
+                        tr('已自动保存上一动作的编辑: {}').format(out_tag))
         act = self._actions[idx]
         self._cur_action_idx = idx
 
@@ -1113,7 +1070,7 @@ class SkeletonCorrector(QMainWindow):
 
         pts3d, was_nan, fps, used = self._load_skeleton(act, self._skel_source)
         if pts3d is None:
-            QMessageBox.warning(self, "错误", f"骨骼加载失败: {act['tag']}")
+            QMessageBox.warning(self, tr('错误'), tr('骨骼加载失败: {}').format(act['tag']))
             return
         self._skel_source = used
 
@@ -1193,7 +1150,7 @@ class SkeletonCorrector(QMainWindow):
         self._ik_overlay = None
         self._ik_unsupported_warned = False
         self._selected_joint = None
-        self.sel_joint_lbl.setText("选中关节: -")
+        self.sel_joint_lbl.setText(tr('选中关节: -'))
 
         # Restore persisted per-action progress (offsets / edited joints).
         saved = self._progress.get(act["tag"], {})
@@ -1284,10 +1241,7 @@ class SkeletonCorrector(QMainWindow):
         ratio_str = f"  ({self.pfps / self.vfps:.1f}x)" if abs(self.pfps - self.vfps) > 0.1 else ""
         src_lbl = dict(srcs).get(self._skel_source, self._skel_source)
         self.statusBar().showMessage(
-            f"动作: {act['tag']}  |  源: {src_lbl}  |  {len(avail)} 相机  |  "
-            f"视频 {self.vtotal}帧@{self.vfps:.0f}fps  |  "
-            f"骨骼 {pts3d.shape[0]}帧@{self.pfps:.0f}fps{ratio_str}  |  "
-            f"{pts3d.shape[1]} 关节")
+            tr('动作: {}  |  源: {}  |  {} 相机  |  视频 {}帧@{:.0f}fps  |  骨骼 {}帧@{:.0f}fps{}  |  {} 关节').format(act['tag'], src_lbl, len(avail), self.vtotal, self.vfps, pts3d.shape[0], self.pfps, ratio_str, pts3d.shape[1]))
 
     def _v2p(self, vframe: int) -> int:
         """Map video frame index to pts3d (skeleton) frame index."""
@@ -1316,7 +1270,7 @@ class SkeletonCorrector(QMainWindow):
         MoSh/SMPL sources write a ``.pkl`` (Save-As, the primary output); the
         CSV source overwrites the source CSV in place (one-time .bak)."""
         if self.pts3d is None or self._source is None:
-            QMessageBox.information(self, "保存", "没有加载的数据可保存。")
+            QMessageBox.information(self, tr('保存'), tr('没有加载的数据可保存。'))
             return
         was_playing = self.play_btn.isChecked()
         if was_playing:
@@ -1329,7 +1283,7 @@ class SkeletonCorrector(QMainWindow):
             if src.output_ext == "pkl":
                 default = src.default_output_path(self.folder, tag)
                 target, _ = QFileDialog.getSaveFileName(
-                    self, "保存编辑后的骨架 (PKL)", default, "Pickle Files (*.pkl)")
+                    self, tr('保存编辑后的骨架 (PKL)'), default, "Pickle Files (*.pkl)")
                 if not target:
                     return
             else:
@@ -1337,7 +1291,7 @@ class SkeletonCorrector(QMainWindow):
                 target = self.csv_path or src.default_output_path(self.folder, tag)
                 if not self.csv_path:
                     target, _ = QFileDialog.getSaveFileName(
-                        self, "导出 3D 点为 CSV", target, "CSV Files (*.csv)")
+                        self, tr('导出 3D 点为 CSV'), target, "CSV Files (*.csv)")
                     if not target:
                         return
                 if os.path.exists(target):
@@ -1352,11 +1306,11 @@ class SkeletonCorrector(QMainWindow):
             try:
                 src.save(self.pts3d, target)
             except Exception as e:
-                QMessageBox.warning(self, "保存失败", str(e))
+                QMessageBox.warning(self, tr('保存失败'), str(e))
                 return
             shape = tuple(np.asarray(self.pts3d).shape)
             QMessageBox.information(
-                self, "已保存", f"已写入: {os.path.basename(target)}  shape={shape}")
+                self, tr('已保存'), tr('已写入: {}  shape={}').format(os.path.basename(target), shape))
         finally:
             if was_playing:
                 self.play_btn.setChecked(True)
@@ -1399,24 +1353,20 @@ class SkeletonCorrector(QMainWindow):
         n_full, vtot = self.pts3d.shape[0], self._raw_vtotal
         ep = self._edited_pkl_path(act, self._skel_source)
         if ep is None:
-            QMessageBox.warning(self, "裁切对齐",
-                                "当前源不是 mosh/SMPL,无法写 _edited.pkl。")
+            QMessageBox.warning(self, tr('裁切对齐'),
+                                tr('当前源不是 mosh/SMPL,无法写 _edited.pkl。'))
             return
         vids = {cam: self.videos.get(cam) for cam in list(self.caps.keys())
                 if self.videos.get(cam) and os.path.exists(self.videos[cam])}
         if hi < lo or not vids:
-            QMessageBox.information(self, "裁切对齐", "没有可裁切的窗口/视频。")
+            QMessageBox.information(self, tr('裁切对齐'), tr('没有可裁切的窗口/视频。'))
             return
         no_trim = (lo == 0 and hi == vtot - 1 and slo == 0 and shi == n_full - 1)
-        head = ("当前无 offset 越界(窗口=全长),裁切相当于原样复制。\n\n"
+        head = (tr('当前无 offset 越界(窗口=全长),裁切相当于原样复制。\n\n')
                 if no_trim else "")
         if QMessageBox.question(
-                self, "裁切对齐 (最终烘焙)",
-                f"{head}将按交集窗口 视频[{lo}..{hi}] (最晚开头/最早结尾):\n"
-                f"• pkl 裁到 {shi - slo + 1} 帧 → {os.path.basename(ep)}\n"
-                f"• 原地裁切 {len(vids)} 个视角源 MP4(各按自己 offset;首次自动 "
-                f".bak 备份)\n\n"
-                f"⚠ 覆盖源视频、最终一次性操作(.bak 可恢复)。继续?",
+                self, tr('裁切对齐 (最终烘焙)'),
+                tr('{}将按交集窗口 视频[{}..{}] (最晚开头/最早结尾):\n• pkl 裁到 {} 帧 → {}\n• 原地裁切 {} 个视角源 MP4(各按自己 offset;首次自动 .bak 备份)\n\n⚠ 覆盖源视频、最终一次性操作(.bak 可恢复)。继续?').format(head, lo, hi, shi - slo + 1, os.path.basename(ep), len(vids)),
                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
 
@@ -1431,7 +1381,7 @@ class SkeletonCorrector(QMainWindow):
                 pickle.dump(np.ascontiguousarray(trimmed, dtype=np.float32),
                             f, protocol=2)
         except Exception as e:
-            QMessageBox.warning(self, "裁切对齐", f"写 pkl 失败: {e}")
+            QMessageBox.warning(self, tr('裁切对齐'), tr('写 pkl 失败: {}').format(e))
             return
 
         # 2) release caps, trim each view in place (read from .bak = original)
@@ -1441,13 +1391,13 @@ class SkeletonCorrector(QMainWindow):
             except Exception:
                 pass
         import shutil
-        prog = self._make_progress("裁切对齐", "裁切视频...", len(vids))
+        prog = self._make_progress(tr('裁切对齐'), tr('裁切视频...'), len(vids))
         done = []
         try:
             for i, (cam, path) in enumerate(vids.items()):
                 if prog.wasCanceled():
                     break
-                prog.setLabelText(f"裁切 {cam} ({i + 1}/{len(vids)})")
+                prog.setLabelText(tr('裁切 {} ({}/{})').format(cam, i + 1, len(vids)))
                 prog.setValue(i)
                 QApplication.processEvents()
                 off = self._view_offsets.get(cam, 0)
@@ -1519,11 +1469,8 @@ class SkeletonCorrector(QMainWindow):
         if was_playing:
             self.play_btn.setChecked(True)
         QMessageBox.information(
-            self, "裁切对齐完成",
-            f"pkl: {n_full}→{trimmed.shape[0]} 帧 → {os.path.basename(ep)}\n"
-            f"视频: 覆盖 {len(done)}/{len(vids)} 个视角 (源已 .bak 备份)\n"
-            f"窗口 视频[{lo}..{hi}];offset 已归零,pkl 与各视角逐帧对齐。\n"
-            f"重做: 用各 .bak 恢复并删除 {os.path.basename(ep)}。")
+            self, tr('裁切对齐完成'),
+            tr('pkl: {}→{} 帧 → {}\n视频: 覆盖 {}/{} 个视角 (源已 .bak 备份)\n窗口 视频[{}..{}];offset 已归零,pkl 与各视角逐帧对齐。\n重做: 用各 .bak 恢复并删除 {}。').format(n_full, trimmed.shape[0], os.path.basename(ep), len(done), len(vids), lo, hi, os.path.basename(ep)))
 
     def _save_all(self) -> None:
         """Save every edited action at once to its default output path.
@@ -1533,7 +1480,7 @@ class SkeletonCorrector(QMainWindow):
         ``*_edited.pkl`` next to the source; CSV sources overwrite in place
         (with a one-time ``.bak``)."""
         if not self._actions:
-            QMessageBox.information(self, "保存全部", "请先打开一个导出文件夹。")
+            QMessageBox.information(self, tr('保存全部'), tr('请先打开一个导出文件夹。'))
             return
         was_playing = self.play_btn.isChecked()
         if was_playing:
@@ -1543,7 +1490,7 @@ class SkeletonCorrector(QMainWindow):
             self._capture_current_progress()
             if not self._edited:
                 QMessageBox.information(
-                    self, "保存全部", "还没有任何已编辑的动作可保存。")
+                    self, tr('保存全部'), tr('还没有任何已编辑的动作可保存。'))
                 return
             by_tag = {a["tag"]: a for a in self._actions}
             written, failed = [], []
@@ -1555,7 +1502,7 @@ class SkeletonCorrector(QMainWindow):
                 sources = {s.key: s for s in self._build_sources(act)}
                 src = sources.get(info["source"]) or sources.get("csv")
                 if src is None:
-                    failed.append(f"{tag}: 无可用数据源")
+                    failed.append(tr('{}: 无可用数据源').format(tag))
                     continue
                 target = src.default_output_path(self.folder, tag)
                 try:
@@ -1567,14 +1514,14 @@ class SkeletonCorrector(QMainWindow):
                     written.append(os.path.basename(target))
                 except Exception as e:
                     failed.append(f"{tag}: {e}")
-            msg = f"已保存 {len(written)} 个动作。"
+            msg = tr('已保存 {} 个动作。').format(len(written))
             if written:
                 msg += "\n" + "\n".join(written[:12])
                 if len(written) > 12:
-                    msg += f"\n… 等共 {len(written)} 个"
+                    msg += tr('\n… 等共 {} 个').format(len(written))
             if failed:
-                msg += "\n\n失败 " + str(len(failed)) + " 个:\n" + "\n".join(failed[:6])
-            QMessageBox.information(self, "保存全部", msg)
+                msg += tr('\n\n失败 ') + str(len(failed)) + tr(' 个:\n') + "\n".join(failed[:6])
+            QMessageBox.information(self, tr('保存全部'), msg)
         finally:
             if was_playing:
                 self.play_btn.setChecked(True)
@@ -1677,16 +1624,14 @@ class SkeletonCorrector(QMainWindow):
         p = self._progress_path()
         if not p:
             if not silent:
-                QMessageBox.information(self, "进度", "请先打开一个导出文件夹。")
+                QMessageBox.information(self, tr('进度'), tr('请先打开一个导出文件夹。'))
             return
         n_edit = self._persist_edits_to_pkl()
         self._write_progress_json()
         if not silent:
             QMessageBox.information(
-                self, "进度",
-                f"进度已保存:\n{os.path.basename(p)}\n"
-                f"({len(self._progress)} 个动作的关键帧/偏移; {n_edit} 个动作的编辑"
-                f"骨架已写入各自的 _edited.pkl,重开自动恢复)")
+                self, tr('进度'),
+                tr('进度已保存:\n{}\n({} 个动作的关键帧/偏移; {} 个动作的编辑骨架已写入各自的 _edited.pkl,重开自动恢复)').format(os.path.basename(p), len(self._progress), n_edit))
 
     # --------------------------------------------------------------- render
     def _show_frame(self) -> None:
@@ -1975,7 +1920,7 @@ class SkeletonCorrector(QMainWindow):
         if not self.mode_all.isChecked():
             if self._selected_joint != joint:
                 self._selected_joint = joint
-                self.sel_joint_lbl.setText(f"选中关节: {joint}")
+                self.sel_joint_lbl.setText(tr('选中关节: {}').format(joint))
                 self._show_frame()
                 return
 
@@ -1987,7 +1932,7 @@ class SkeletonCorrector(QMainWindow):
         z = get_camera_depth(self.pts3d[pidx, joint], R, t)
         if not np.isfinite(z) or z <= 1e-6:
             self.statusBar().showMessage(
-                f"无法开始拖动: 关节 {joint} 在 {cam} 视角下深度无效")
+                tr('无法开始拖动: 关节 {} 在 {} 视角下深度无效').format(joint, cam))
             return
         # Do NOT push undo or mark an edit yet. A click with no drag must not
         # create a keyframe/pin — only an actual move counts (see _on_move).
@@ -2087,7 +2032,7 @@ class SkeletonCorrector(QMainWindow):
             self._update_undo_lbl()
             # The keyframe was already added by the pin invariant in _on_move.
             self.statusBar().showMessage(
-                f"关节 {joint} 已更新  |  关键帧 skel {self._v2p(self.cur_frame)}")
+                tr('关节 {} 已更新  |  关键帧 skel {}').format(joint, self._v2p(self.cur_frame)))
         else:
             # Click WITHOUT drag = anchor this joint at the current frame with
             # its current pose (no value change). Pin good original frames just
@@ -2121,7 +2066,7 @@ class SkeletonCorrector(QMainWindow):
             if not getattr(self, "_ik_unsupported_warned", False):
                 self._ik_unsupported_warned = True
                 self.statusBar().showMessage(
-                    f"IK: 当前骨架 ({J} 点) 不支持 IK,已按普通拖动处理。")
+                    tr('IK: 当前骨架 ({} 点) 不支持 IK,已按普通拖动处理。').format(J))
             return None
         chain = eff_map.get(joint)
         if chain is not None:
@@ -2148,7 +2093,7 @@ class SkeletonCorrector(QMainWindow):
         center = P[pidx, parent]
         if not np.all(np.isfinite(center)):
             self.statusBar().showMessage(
-                f"IK: 父关节 {parent} 本帧无效,无法球面调整。")
+                tr('IK: 父关节 {} 本帧无效,无法球面调整。').format(parent))
             return set()
         key = (parent, -1, joint)                     # pair-length cache slot
         r = self._ik_len_cache.get(key)
@@ -2156,22 +2101,21 @@ class SkeletonCorrector(QMainWindow):
             val = ik.reference_pair_length(P, parent, joint)
             if val is None:
                 self.statusBar().showMessage(
-                    f"IK: 骨长 {parent}→{joint} 无法估计(有效帧太少),"
-                    "请改用普通拖动。")
+                    tr('IK: 骨长 {}→{} 无法估计(有效帧太少),请改用普通拖动。').format(parent, joint))
                 return set()
             r = (val, val)
             self._ik_len_cache[key] = r
         new_p = ik.orient_on_sphere(center, r[0], target)
         if new_p is None:
             self.statusBar().showMessage(
-                "IK: 拖动位置与父关节重合,方向不确定,请向外拖。")
+                tr('IK: 拖动位置与父关节重合,方向不确定,请向外拖。'))
             return set()
         if not self._undo_pushed_for_drag:
             self._push_undo()
             self._undo_pushed_for_drag = True
         P[pidx, joint] = new_p
         self.statusBar().showMessage(
-            f"IK: 关节 {joint} 绕关节 {parent} 球面调整(骨长锁定,只调朝向)")
+            tr('IK: 关节 {} 绕关节 {} 球面调整(骨长锁定,只调朝向)').format(joint, parent))
         return {joint}
 
     def _ik_move_subtree(self, pidx: int, joint: int,
@@ -2183,7 +2127,7 @@ class SkeletonCorrector(QMainWindow):
         old = P[pidx, joint]
         if not np.all(np.isfinite(old)):
             self.statusBar().showMessage(
-                f"IK: 关节 {joint} 本帧无效,无法平移。")
+                tr('IK: 关节 {} 本帧无效,无法平移。').format(joint))
             return set()
         delta = np.asarray(target, float) - old
         if not self._undo_pushed_for_drag:
@@ -2194,9 +2138,9 @@ class SkeletonCorrector(QMainWindow):
             if np.all(np.isfinite(P[pidx, j])):
                 P[pidx, j] = P[pidx, j] + delta
                 moved.add(j)
-        label = ("整个骨架" if joint == 0
-                 else f"关节 {joint} 及其子树({len(moved)} 关节)")
-        self.statusBar().showMessage(f"IK: {label}刚性平移")
+        label = (tr('整个骨架') if joint == 0
+                 else tr('关节 {} 及其子树({} 关节)').format(joint, len(moved)))
+        self.statusBar().showMessage(tr('IK: {}刚性平移').format(label))
         return moved
 
     def _ik_move_root(self, pidx: int, chain: ik.LimbChain,
@@ -2210,7 +2154,7 @@ class SkeletonCorrector(QMainWindow):
         old_root = P[pidx, chain.root]
         if not np.all(np.isfinite(old_root)):
             self.statusBar().showMessage(
-                f"IK: {chain.name}根部(关节 {chain.root})本帧无效,无法平移。")
+                tr('IK: {}根部(关节 {})本帧无效,无法平移。').format(chain.name, chain.root))
             return set()
         delta = np.asarray(target, float) - old_root
         joints = [chain.root, chain.mid, chain.eff]
@@ -2226,7 +2170,7 @@ class SkeletonCorrector(QMainWindow):
                 moved.add(j)
         self._ik_overlay = {"chain": chain, "circle": None}
         self.statusBar().showMessage(
-            f"IK: {chain.name}整肢平移(链内骨长不变)")
+            tr('IK: {}整肢平移(链内骨长不变)').format(chain.name))
         return moved
 
     def _ik_move_effector(self, pidx: int, chain: ik.LimbChain,
@@ -2235,14 +2179,12 @@ class SkeletonCorrector(QMainWindow):
         root = P[pidx, chain.root]
         if not np.all(np.isfinite(root)):
             self.statusBar().showMessage(
-                f"IK: {chain.name}根部(关节 {chain.root})本帧无效,无法求解;"
-                "可先用普通拖动修根部。")
+                tr('IK: {}根部(关节 {})本帧无效,无法求解;可先用普通拖动修根部。').format(chain.name, chain.root))
             return set()
         ref = self._ik_lengths(chain)
         if ref is None:
             self.statusBar().showMessage(
-                f"IK: {chain.name}骨长无法估计(本片段有效帧太少),"
-                "请改用普通拖动。")
+                tr('IK: {}骨长无法估计(本片段有效帧太少),请改用普通拖动。').format(chain.name))
             return set()
         l1, l2 = ref
         prev_mid = P[pidx - 1, chain.mid] if pidx > 0 else None
@@ -2250,7 +2192,7 @@ class SkeletonCorrector(QMainWindow):
                                 P[pidx, chain.mid], prev_mid)
         if res is None:
             self.statusBar().showMessage(
-                f"IK: 目标与{chain.name}根部重合,无法求解。")
+                tr('IK: 目标与{}根部重合,无法求解。').format(chain.name))
             return set()
         mid, eff, clamped = res
         if not self._undo_pushed_for_drag:
@@ -2268,8 +2210,8 @@ class SkeletonCorrector(QMainWindow):
         P[pidx, chain.eff] = eff
         self._ik_overlay = {"chain": chain, "circle": None}
         self.statusBar().showMessage(
-            f"IK: {chain.name}已求解(骨长锁定)"
-            + ("  |  超出可及范围 → 完全伸直并钳制" if clamped else ""))
+            tr('IK: {}已求解(骨长锁定)').format(chain.name)
+            + (tr('  |  超出可及范围 → 完全伸直并钳制') if clamped else ""))
         return moved
 
     def _ik_move_mid(self, pidx: int, chain: ik.LimbChain,
@@ -2278,26 +2220,23 @@ class SkeletonCorrector(QMainWindow):
         root, eff = P[pidx, chain.root], P[pidx, chain.eff]
         if not (np.all(np.isfinite(root)) and np.all(np.isfinite(eff))):
             self.statusBar().showMessage(
-                f"IK: {chain.name}的根部或末端本帧无效,无法调摆向。")
+                tr('IK: {}的根部或末端本帧无效,无法调摆向。').format(chain.name))
             return set()
         ref = self._ik_lengths(chain)
         if ref is None:
             self.statusBar().showMessage(
-                f"IK: {chain.name}骨长无法估计(本片段有效帧太少),"
-                "请改用普通拖动。")
+                tr('IK: {}骨长无法估计(本片段有效帧太少),请改用普通拖动。').format(chain.name))
             return set()
         l1, l2 = ref
         new_mid = ik.solve_swivel(root, eff, l1, l2, target)
         if new_mid is None:
             d = float(np.linalg.norm(eff - root))
             if d >= l1 + l2 - 1e-9:
-                msg = (f"IK: {chain.name}已完全伸直,无摆向可调 —— "
-                       "先拖动末端(腕/踝)。")
+                msg = (tr('IK: {}已完全伸直,无摆向可调 —— 先拖动末端(腕/踝)。').format(chain.name))
             elif d <= abs(l1 - l2) + 1e-9:
-                msg = (f"IK: {chain.name}末端离根部过近,无有效圆弧 —— "
-                       "先拖动末端(腕/踝)。")
+                msg = (tr('IK: {}末端离根部过近,无有效圆弧 —— 先拖动末端(腕/踝)。').format(chain.name))
             else:
-                msg = "IK: 拖动位置在肢体轴线上,摆向不确定,请向侧面拖。"
+                msg = tr('IK: 拖动位置在肢体轴线上,摆向不确定,请向侧面拖。')
             self.statusBar().showMessage(msg)
             return set()
         if not self._undo_pushed_for_drag:
@@ -2310,7 +2249,7 @@ class SkeletonCorrector(QMainWindow):
             "circle": (ik.sample_circle(*circ) if circ is not None else None),
         }
         self.statusBar().showMessage(
-            f"IK: {chain.name}摆向已调整(末端与根部不动,骨长锁定)")
+            tr('IK: {}摆向已调整(末端与根部不动,骨长锁定)').format(chain.name))
         return {chain.mid}
 
     def _ik_len_dialog(self) -> None:
@@ -2321,13 +2260,13 @@ class SkeletonCorrector(QMainWindow):
         Overrides live until another action/source is loaded (they are
         per-clip by design, like the medians they replace)."""
         if self.pts3d is None:
-            QMessageBox.information(self, "IK 骨长", "请先加载一个动作片段。")
+            QMessageBox.information(self, tr('IK 骨长'), tr('请先加载一个动作片段。'))
             return
         J = self.pts3d.shape[1]
         chains = ik.limb_chains(J)
         if not chains:
             QMessageBox.information(
-                self, "IK 骨长", f"当前骨架 ({J} 点) 不支持 IK。")
+                self, tr('IK 骨长'), tr('当前骨架 ({} 点) 不支持 IK。').format(J))
             return
         pidx = self._v2p(self.cur_frame)
 
@@ -2340,12 +2279,10 @@ class SkeletonCorrector(QMainWindow):
             return (float(np.linalg.norm(b - a)), float(np.linalg.norm(e - b)))
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("IK 骨长设置 (本片段有效)")
+        dlg.setWindowTitle(tr('IK 骨长设置 (本片段有效)'))
         lay = QVBoxLayout(dlg)
         note = QLabel(
-            "IK 求解锁定的骨长。默认 = 本片段中位数;整段肢体都坏时中位数"
-            "也会不准,可在此手动改。单位与骨架数据一致(通常为米)。\n"
-            "作用范围 = 当前片段;切换动作后恢复为该片段的中位数。")
+            tr('IK 求解锁定的骨长。默认 = 本片段中位数;整段肢体都坏时中位数也会不准,可在此手动改。单位与骨架数据一致(通常为米)。\n作用范围 = 当前片段;切换动作后恢复为该片段的中位数。'))
         note.setWordWrap(True)
         note.setStyleSheet("color:#888;")
         lay.addWidget(note)
@@ -2358,16 +2295,16 @@ class SkeletonCorrector(QMainWindow):
             for s, v in ((s1, ref[0]), (s2, ref[1])):
                 s.setDecimals(3); s.setSingleStep(0.005)
                 s.setRange(0.01, 2.0); s.setValue(v)
-            row.addWidget(QLabel("上骨:")); row.addWidget(s1)
-            row.addWidget(QLabel("下骨:")); row.addWidget(s2)
+            row.addWidget(QLabel(tr('上骨:'))); row.addWidget(s1)
+            row.addWidget(QLabel(tr('下骨:'))); row.addWidget(s2)
             w = QWidget(); w.setLayout(row)
             form.addRow(f"{c.name} ({c.root}→{c.mid}→{c.eff}):", w)
             spins[c] = (s1, s2)
         lay.addLayout(form)
 
         btn_row = QHBoxLayout()
-        b_med = QPushButton("全部重置为片段中位数")
-        b_cur = QPushButton("全部读取当前帧骨长")
+        b_med = QPushButton(tr('全部重置为片段中位数'))
+        b_cur = QPushButton(tr('全部读取当前帧骨长'))
 
         def fill(getter) -> None:
             for c, (s1, s2) in spins.items():
@@ -2388,7 +2325,7 @@ class SkeletonCorrector(QMainWindow):
         for c, (s1, s2) in spins.items():
             self._ik_len_cache[(c.root, c.mid, c.eff)] = (
                 float(s1.value()), float(s2.value()))
-        self.statusBar().showMessage("IK 骨长已更新(仅本片段生效)。")
+        self.statusBar().showMessage(tr('IK 骨长已更新(仅本片段生效)。'))
 
     def _anchor_joint_here(self, joint: int) -> None:
         """TOGGLE one joint's anchor at the current frame (using its CURRENT
@@ -2410,10 +2347,10 @@ class SkeletonCorrector(QMainWindow):
                     self._keyframes.remove(pidx)
             self._refresh_kf_list()
             self._refresh_edited_list()
-            self.statusBar().showMessage(f"已取消锚定关节 {joint} @ skel {pidx}")
+            self.statusBar().showMessage(tr('已取消锚定关节 {} @ skel {}').format(joint, pidx))
             return
         if not np.all(np.isfinite(self.pts3d[pidx, joint])):  # toggle ON
-            self.statusBar().showMessage(f"关节 {joint} 在当前帧无效,无法锚定。")
+            self.statusBar().showMessage(tr('关节 {} 在当前帧无效,无法锚定。').format(joint))
             return
         self.edited_joints.add(joint)
         self._kf_joints.setdefault(pidx, set()).add(joint)
@@ -2423,9 +2360,9 @@ class SkeletonCorrector(QMainWindow):
         self._refresh_kf_list()
         self._refresh_edited_list()
         n = self._joint_pin_counts().get(joint, 0)
-        ready = "✓ 可插值" if n >= 2 else "还需在另一帧再锚一次(或拖动)"
+        ready = tr('✓ 可插值') if n >= 2 else tr('还需在另一帧再锚一次(或拖动)')
         self.statusBar().showMessage(
-            f"已锚定关节 {joint} @ skel {pidx}(当前姿态) —— 该关节共 {n} 个关键帧,{ready}")
+            tr('已锚定关节 {} @ skel {}(当前姿态) —— 该关节共 {} 个关键帧,{}').format(joint, pidx, n, ready))
 
     # -------------------------------------------------------------- undo
     def _push_undo(self) -> None:
@@ -2449,7 +2386,7 @@ class SkeletonCorrector(QMainWindow):
 
     def _undo(self) -> None:
         if not self.undo_stack:
-            self.statusBar().showMessage("没有可撤销的步骤")
+            self.statusBar().showMessage(tr('没有可撤销的步骤'))
             return
         pts, kfs, kfj, edited = self.undo_stack.pop()
         self.pts3d = pts
@@ -2460,10 +2397,10 @@ class SkeletonCorrector(QMainWindow):
         self._refresh_edited_list()
         self._update_undo_lbl()
         self._show_frame()
-        self.statusBar().showMessage("已撤销 (骨骼 + 关键帧/锚点)")
+        self.statusBar().showMessage(tr('已撤销 (骨骼 + 关键帧/锚点)'))
 
     def _update_undo_lbl(self) -> None:
-        self.undo_lbl.setText(f"撤销步数: {len(self.undo_stack)}")
+        self.undo_lbl.setText(tr('撤销步数: {}').format(len(self.undo_stack)))
 
     def _reset_all(self) -> None:
         """Restore the skeleton to its as-loaded (unedited) state: revert all
@@ -2472,9 +2409,8 @@ class SkeletonCorrector(QMainWindow):
         if self.pts3d is None or self.pts3d_orig is None:
             return
         ans = QMessageBox.question(
-            self, "确认",
-            "一键还原:把骨骼恢复到加载时(未调整)的状态?\n"
-            "(清空所有编辑/关键帧,可用 Ctrl+Z 撤销)",
+            self, tr('确认'),
+            tr('一键还原:把骨骼恢复到加载时(未调整)的状态?\n(清空所有编辑/关键帧,可用 Ctrl+Z 撤销)'),
             QMessageBox.Yes | QMessageBox.No)
         if ans != QMessageBox.Yes:
             return
@@ -2498,7 +2434,7 @@ class SkeletonCorrector(QMainWindow):
         self._refresh_edited_list()
         self._refresh_kf_list()
         self._show_frame()
-        self.statusBar().showMessage("已还原到未调整的骨骼状态(可 Ctrl+Z 撤销)")
+        self.statusBar().showMessage(tr('已还原到未调整的骨骼状态(可 Ctrl+Z 撤销)'))
 
     # ------------------------------------------------- calibration report
     def _calib_report(self) -> None:
@@ -2511,11 +2447,11 @@ class SkeletonCorrector(QMainWindow):
         off-screen). Where manual correspondences exist it also reports the
         reprojection RMSE."""
         if not self.calibs or self.pts3d is None:
-            QMessageBox.information(self, "标定体检", "请先打开场景并加载动作。")
+            QMessageBox.information(self, tr('标定体检'), tr('请先打开场景并加载动作。'))
             return
         avail = [c for c in CAMERA_NAMES if c in self.caps and c in self.calibs]
         if not avail:
-            QMessageBox.information(self, "标定体检", "当前动作没有可用相机。")
+            QMessageBox.information(self, tr('标定体检'), tr('当前动作没有可用相机。'))
             return
 
         T = self.pts3d.shape[0]
@@ -2525,9 +2461,8 @@ class SkeletonCorrector(QMainWindow):
         tag = (self._actions[self._cur_action_idx]["tag"]
                if self._cur_action_idx >= 0 else "-")
         head = [
-            f"标定体检报告 — 场景: {os.path.basename(self.folder or '')}",
-            f"动作: {tag}    骨架: {T}帧 × {self.pts3d.shape[1]}关节"
-            f"    投影采样 {len(sample)} 帧",
+            tr('标定体检报告 — 场景: {}').format(os.path.basename(self.folder or '')),
+            tr('动作: {}    骨架: {}帧 × {}关节    投影采样 {} 帧').format(tag, T, self.pts3d.shape[1], len(sample)),
             "=" * 66,
         ]
         blocks: list[str] = []
@@ -2548,26 +2483,22 @@ class SkeletonCorrector(QMainWindow):
             if W and H and (abs(cx - W / 2) / W > 0.15
                             or abs(cy - H / 2) / H > 0.15):
                 cam_flags.append(
-                    f"主点偏离画面中心 (cx={cx:.0f}/{W}, cy={cy:.0f}/{H}) "
-                    "— 可能 720p/1080p 内参未缩放")
+                    tr('主点偏离画面中心 (cx={:.0f}/{}, cy={:.0f}/{}) — 可能 720p/1080p 内参未缩放').format(cx, W, cy, H))
             if fx and fy and abs(fx - fy) / max(fx, fy) > 0.15:
-                cam_flags.append(f"fx/fy 差异大 ({fx:.0f} vs {fy:.0f})")
+                cam_flags.append(tr('fx/fy 差异大 ({:.0f} vs {:.0f})').format(fx, fy))
             dmax = float(np.max(np.abs(dist))) if dist.size else 0.0
             if dmax > 1.0:
                 cam_flags.append(
-                    f"畸变系数很大 (|d|max={dmax:.2f}) — 可能是鱼眼,"
-                    "Brown 5 参模型表达不足")
+                    tr('畸变系数很大 (|d|max={:.2f}) — 可能是鱼眼,Brown 5 参模型表达不足').format(dmax))
 
             # extrinsic / camera center
             Rt = extract_R_t(extr)
-            pos_txt = "   外参: 解析失败"
+            pos_txt = tr('   外参: 解析失败')
             if Rt is not None:
                 R, t = Rt
                 t = np.array(t, dtype=np.float64).reshape(3)
                 C = -R.T @ t
-                pos_txt = (f"   相机中心(世界系): "
-                           f"[{C[0]:.2f}, {C[1]:.2f}, {C[2]:.2f}]  "
-                           f"距原点 {np.linalg.norm(C):.2f}")
+                pos_txt = (tr('   相机中心(世界系): [{:.2f}, {:.2f}, {:.2f}]  距原点 {:.2f}').format(C[0], C[1], C[2], np.linalg.norm(C)))
 
             # projection plausibility over sampled frames
             fracs = []
@@ -2585,8 +2516,7 @@ class SkeletonCorrector(QMainWindow):
             mean_in = float(np.mean(fracs)) if fracs else 0.0
             if mean_in < 0.6:
                 cam_flags.append(
-                    f"投影大量落在画面外 (平均仅 {mean_in * 100:.0f}% 关节在内) "
-                    "— 外参/时间/缩放可疑")
+                    tr('投影大量落在画面外 (平均仅 {:.0f}% 关节在内) — 外参/时间/缩放可疑').format(mean_in * 100))
 
             rmse_line = ""
             cc = corr_by_cam.get(cam)
@@ -2597,14 +2527,14 @@ class SkeletonCorrector(QMainWindow):
                 if pj is not None:
                     pj = pj.astype(np.float64).reshape(-1, 2)
                     rms = float(np.sqrt(np.mean(np.sum((pj - img) ** 2, axis=1))))
-                    rmse_line = f"   手标点重投影 RMSE: {rms:.1f}px ({len(cc)} 点)"
+                    rmse_line = tr('   手标点重投影 RMSE: {:.1f}px ({} 点)').format(rms, len(cc))
 
             block = [
-                f"[{cam}]  分辨率 {W}×{H}",
+                tr('[{}]  分辨率 {}×{}').format(cam, W, H),
                 f"   K: fx={fx:.1f} fy={fy:.1f} cx={cx:.1f} cy={cy:.1f}",
-                f"   畸变: {np.round(dist, 4).tolist()}",
+                tr('   畸变: {}').format(np.round(dist, 4).tolist()),
                 pos_txt,
-                f"   投影在画面内: 平均 {mean_in * 100:.0f}% 关节",
+                tr('   投影在画面内: 平均 {:.0f}% 关节').format(mean_in * 100),
             ]
             if rmse_line:
                 block.append(rmse_line)
@@ -2612,12 +2542,12 @@ class SkeletonCorrector(QMainWindow):
                 block += [f"   ⚠ {f}" for f in cam_flags]
                 flagged.append(cam)
             else:
-                block.append("   ✓ 参数基本正常")
+                block.append(tr('   ✓ 参数基本正常'))
             block.append("-" * 66)
             blocks.append("\n".join(block))
 
-        summary = (f"⚠ 需要关注的相机: {', '.join(flagged)}" if flagged
-                   else "✓ 所有相机参数体检通过(仅基础检查,仍建议看投影叠加)")
+        summary = (tr('⚠ 需要关注的相机: {}').format(', '.join(flagged)) if flagged
+                   else tr('✓ 所有相机参数体检通过(仅基础检查,仍建议看投影叠加)'))
         report = "\n".join(head + [summary, "=" * 66] + blocks)
 
         # Persist a copy next to the scene for sharing.
@@ -2629,10 +2559,10 @@ class SkeletonCorrector(QMainWindow):
             try:
                 with open(p, "w", encoding="utf-8") as f:
                     f.write(report)
-                saved_to = f"\n\n(已保存: {os.path.basename(p)})"
+                saved_to = tr('\n\n(已保存: {})').format(os.path.basename(p))
             except Exception:
                 pass
-        self._show_text_dialog("标定体检报告", report + saved_to)
+        self._show_text_dialog(tr('标定体检报告'), report + saved_to)
 
     def _show_text_dialog(self, title: str, text: str) -> None:
         dlg = QDialog(self)
@@ -2653,7 +2583,7 @@ class SkeletonCorrector(QMainWindow):
     # ------------------------------------------------- progress dialogs
     def _make_progress(self, title: str, label: str, maximum: int):
         """A cancellable modal progress dialog for long detection loops."""
-        dlg = QProgressDialog(label, "取消", 0, max(1, maximum), self)
+        dlg = QProgressDialog(label, tr('取消'), 0, max(1, maximum), self)
         dlg.setWindowTitle(title)
         dlg.setWindowModality(Qt.WindowModal)
         dlg.setMinimumDuration(0)
@@ -2679,14 +2609,14 @@ class SkeletonCorrector(QMainWindow):
         if self._pose2d is not None:
             return True
         if not pose2d.available():
-            QMessageBox.warning(self, "需要 2D 姿态模型", pose2d.install_hint())
+            QMessageBox.warning(self, tr('需要 2D 姿态模型'), pose2d.install_hint())
             return False
-        busy = self._busy("计算中", "正在加载 2D 姿态模型(首次会下载,请稍候)...")
+        busy = self._busy(tr('计算中'), tr('正在加载 2D 姿态模型(首次会下载,请稍候)...'))
         try:
             self._pose2d = pose2d.Pose2D()
         except Exception as e:
             busy.close()
-            QMessageBox.warning(self, "模型加载失败",
+            QMessageBox.warning(self, tr('模型加载失败'),
                                 f"{e}\n\n{pose2d.install_hint()}")
             return False
         busy.close()
@@ -2700,9 +2630,9 @@ class SkeletonCorrector(QMainWindow):
         if self._pose2d_fast is not None:
             return self._pose2d_fast
         if not pose2d.available():
-            QMessageBox.warning(self, "需要 2D 姿态模型", pose2d.install_hint())
+            QMessageBox.warning(self, tr('需要 2D 姿态模型'), pose2d.install_hint())
             return None
-        busy = self._busy("计算中", "正在加载快速 2D 姿态模型(首次会下载)...")
+        busy = self._busy(tr('计算中'), tr('正在加载快速 2D 姿态模型(首次会下载)...'))
         try:
             self._pose2d_fast = pose2d.Pose2D("rtmpose-lite")
         except Exception:
@@ -2734,22 +2664,22 @@ class SkeletonCorrector(QMainWindow):
         reports the reprojection residual. Uses the cameras' own 2D — never the
         SMPL/MoSh 3D — so it scores the relative calibration directly."""
         if not self.calibs or not self.caps or self.vtotal <= 0:
-            QMessageBox.information(self, "一致性检查", "请先打开场景并加载动作。")
+            QMessageBox.information(self, tr('一致性检查'), tr('请先打开场景并加载动作。'))
             return
         top = self.cam_top_combo.currentText()
         bot = self.cam_bot_combo.currentText()
         if not top or not bot or top == bot:
             QMessageBox.information(
-                self, "一致性检查",
-                "请在上、下视图选两个不同的相机(建议 topcenter / diagonal)。")
+                self, tr('一致性检查'),
+                tr('请在上、下视图选两个不同的相机(建议 topcenter / diagonal)。'))
             return
         for cam in (top, bot):
             if cam not in self.calibs or cam not in self.caps:
-                QMessageBox.information(self, "一致性检查", f"相机 {cam} 不可用。")
+                QMessageBox.information(self, tr('一致性检查'), tr('相机 {} 不可用。').format(cam))
                 return
         c1, c2 = self._cam_params(top), self._cam_params(bot)
         if c1 is None or c2 is None:
-            QMessageBox.warning(self, "一致性检查", "相机缺少外参,无法三角化。")
+            QMessageBox.warning(self, tr('一致性检查'), tr('相机缺少外参,无法三角化。'))
             return
 
         # Lazily build the detector; guide install if missing.
@@ -2764,13 +2694,13 @@ class SkeletonCorrector(QMainWindow):
 
         pairs_j, pts1, pts2 = [], [], []
         n_det = 0
-        prog = self._make_progress("计算中", "双视角一致性检查: 检测中...",
+        prog = self._make_progress(tr('计算中'), tr('双视角一致性检查: 检测中...'),
                                     len(frames))
         try:
             for k, fi in enumerate(frames):
                 if prog.wasCanceled():
                     break
-                prog.setLabelText(f"双视角一致性检查: 检测帧 {k + 1}/{len(frames)}")
+                prog.setLabelText(tr('双视角一致性检查: 检测帧 {}/{}').format(k + 1, len(frames)))
                 prog.setValue(k)
                 QApplication.processEvents()
                 f1 = self._read_cam_frame(top, fi)
@@ -2789,14 +2719,12 @@ class SkeletonCorrector(QMainWindow):
                         pts2.append(xy2[j])
         finally:
             prog.close()
-            self.statusBar().showMessage("一致性检查完成")
+            self.statusBar().showMessage(tr('一致性检查完成'))
 
         if len(pts1) < 8:
             QMessageBox.information(
-                self, "一致性检查",
-                f"有效对应点太少({len(pts1)}),无法评估。\n"
-                f"(检测到双视角姿态的帧: {n_det}/{len(frames)})\n"
-                "可换更清晰/人物更居中的动作再试。")
+                self, tr('一致性检查'),
+                tr('有效对应点太少({}),无法评估。\n(检测到双视角姿态的帧: {}/{})\n可换更清晰/人物更居中的动作再试。').format(len(pts1), n_det, len(frames)))
             return
 
         pts1 = np.array(pts1)
@@ -2807,8 +2735,8 @@ class SkeletonCorrector(QMainWindow):
         res = (res1 + res2) / 2.0
         usable = mask & np.isfinite(res)
         if usable.sum() < 8:
-            QMessageBox.information(self, "一致性检查",
-                                    "三角化有效点太少(多数点落在相机后方)。")
+            QMessageBox.information(self, tr('一致性检查'),
+                                    tr('三角化有效点太少(多数点落在相机后方)。'))
             return
 
         med = float(np.median(res[usable]))
@@ -2817,35 +2745,31 @@ class SkeletonCorrector(QMainWindow):
         names = pose2d.COCO_KEYPOINTS
         jset = sorted(set(pairs_j))
         lines = [
-            f"双视角一致性检查 (无循环依赖)",
-            f"相机对: {top}  ↔  {bot}",
-            f"检测到双视角姿态的帧: {n_det}/{len(frames)}    "
-            f"有效关节对: {int(usable.sum())}",
+            tr('双视角一致性检查 (无循环依赖)'),
+            tr('相机对: {}  ↔  {}').format(top, bot),
+            tr('检测到双视角姿态的帧: {}/{}    有效关节对: {}').format(n_det, len(frames), int(usable.sum())),
             "=" * 60,
-            f"重投影残差(两视角均值)  中位数 {med:.1f}px    90分位 {p90:.1f}px",
+            tr('重投影残差(两视角均值)  中位数 {:.1f}px    90分位 {:.1f}px').format(med, p90),
             "-" * 60,
-            "按关节(中位残差, px):",
+            tr('按关节(中位残差, px):'),
         ]
         pairs_arr = np.array(pairs_j)
         for j in jset:
             jm = (pairs_arr == j) & usable
             if jm.any():
-                lines.append(f"   {names[j]:<16} {np.median(res[jm]):6.1f}  "
-                             f"({int(jm.sum())}点)")
+                lines.append(tr('   {:<16} {:6.1f}  ({}点)').format(names[j], np.median(res[jm]), int(jm.sum())))
         lines.append("-" * 60)
         if med < 4:
-            verdict = "✓ 标定优秀:两相机高度一致(残差接近检测噪声下限)。"
+            verdict = tr('✓ 标定优秀:两相机高度一致(残差接近检测噪声下限)。')
         elif med < 10:
-            verdict = "✓ 标定良好/可用:残差在正常范围。"
+            verdict = tr('✓ 标定良好/可用:残差在正常范围。')
         elif med < 25:
-            verdict = ("⚠ 残差偏大:外参/内参或检测有问题,建议核对该相机对"
-                       "(尤其畸变较大的 diagonal 边缘)。")
+            verdict = (tr('⚠ 残差偏大:外参/内参或检测有问题,建议核对该相机对(尤其畸变较大的 diagonal 边缘)。'))
         else:
-            verdict = "✗ 残差很大:该相机对的相对标定很可能有误。"
+            verdict = tr('✗ 残差很大:该相机对的相对标定很可能有误。')
         lines.append(verdict)
-        lines.append("\n注:残差里含 2D 检测自身噪声(通常数像素),"
-                     "故几像素的下限属正常。")
-        self._show_text_dialog("双视角一致性检查", "\n".join(lines))
+        lines.append(tr('\n注:残差里含 2D 检测自身噪声(通常数像素),故几像素的下限属正常。'))
+        self._show_text_dialog(tr('双视角一致性检查'), "\n".join(lines))
 
     # ------------------------------------------------------ edited joints
     def _refresh_edited_list(self) -> None:
@@ -2857,9 +2781,9 @@ class SkeletonCorrector(QMainWindow):
         joints = sorted(set(self.edited_joints) | set(counts))
         for j in joints:
             c = counts.get(j, 0)
-            tag = ("✓ 可插值" if c >= 2 else
-                   "① 需再加1关键帧" if c == 1 else "—")
-            self.edited_list.addItem(f"joint {j}   [{c} 关键帧]  {tag}")
+            tag = (tr('✓ 可插值') if c >= 2 else
+                   tr('① 需再加1关键帧') if c == 1 else "—")
+            self.edited_list.addItem(tr('joint {}   [{} 关键帧]  {}').format(j, c, tag))
 
     def _edited_list_joint(self) -> int | None:
         """Joint index of the selected row in the edited-joints list."""
@@ -2877,7 +2801,7 @@ class SkeletonCorrector(QMainWindow):
         left with no pinned joints, and unmark it as edited. Undoable."""
         j = self._edited_list_joint()
         if j is None:
-            self.statusBar().showMessage("先在列表中选中一个关节。")
+            self.statusBar().showMessage(tr('先在列表中选中一个关节。'))
             return
         if self.pts3d is None:
             return
@@ -2904,15 +2828,14 @@ class SkeletonCorrector(QMainWindow):
         self._refresh_edited_list()
         self._show_frame()
         self.statusBar().showMessage(
-            f"关节 {j} 已还原为原始轨迹,并清除其全部关键帧标记"
-            f"({len(emptied)} 个关键帧因此清空移除)。可 Ctrl+Z 撤销。")
+            tr('关节 {} 已还原为原始轨迹,并清除其全部关键帧标记({} 个关键帧因此清空移除)。可 Ctrl+Z 撤销。').format(j, len(emptied)))
 
     def _clear_edited(self) -> None:
         """Clear the edited list AND all per-joint pins so nothing keeps
         interpolating invisibly. Poses stay as-is (use 还原选中 / 一键还原 to
         revert values). Undoable."""
         if not self.edited_joints and not self._kf_joints:
-            self.statusBar().showMessage("没有已编辑关节/锚点可清空。")
+            self.statusBar().showMessage(tr('没有已编辑关节/锚点可清空。'))
             return
         self._push_undo()
         self.edited_joints.clear()
@@ -2925,20 +2848,19 @@ class SkeletonCorrector(QMainWindow):
         self._refresh_kf_list()
         self._refresh_edited_list()
         self.statusBar().showMessage(
-            "已清空:编辑标记 + 全部逐关节锚点(骨骼姿态未改;插值不会再动这些关节)。"
-            "可 Ctrl+Z 撤销。")
+            tr('已清空:编辑标记 + 全部逐关节锚点(骨骼姿态未改;插值不会再动这些关节)。可 Ctrl+Z 撤销。'))
 
     def _on_mode_changed(self, _state: int) -> None:
         if self.mode_all.isChecked():
             self._selected_joint = None
-            self.sel_joint_lbl.setText("选中关节: -")
+            self.sel_joint_lbl.setText(tr('选中关节: -'))
         self._show_frame()
 
     # ---------------------------------------------------------- keyframes
     def _refresh_kf_list(self) -> None:
         self.kf_list.clear()
         for p in sorted(self._keyframes):
-            self.kf_list.addItem(f"skel {p}  (视频 {self._p2v(p)})")
+            self.kf_list.addItem(tr('skel {}  (视频 {})').format(p, self._p2v(p)))
 
     def _copy_pose(self, which: str) -> None:
         """Copy a known-good earlier pose onto the current frame, then anchor it
@@ -2951,21 +2873,21 @@ class SkeletonCorrector(QMainWindow):
         if which == "kf":
             prev = [k for k in sorted(self._keyframes) if k < pidx]
             if not prev:
-                self.statusBar().showMessage("当前帧之前没有关键帧可复制。")
+                self.statusBar().showMessage(tr('当前帧之前没有关键帧可复制。'))
                 return
             src = prev[-1]
-            label = f"上一关键帧 skel {src}"
+            label = tr('上一关键帧 skel {}').format(src)
         else:
             if self.cur_frame <= self._play_lo:
-                self.statusBar().showMessage("已是起始帧,没有上一帧可复制。")
+                self.statusBar().showMessage(tr('已是起始帧,没有上一帧可复制。'))
                 return
             src = self._v2p(self.cur_frame - 1)
-            label = f"上一帧 skel {src}"
+            label = tr('上一帧 skel {}').format(src)
         if src == pidx or not (0 <= src < self.pts3d.shape[0]):
-            self.statusBar().showMessage("没有可复制的不同来源帧。")
+            self.statusBar().showMessage(tr('没有可复制的不同来源帧。'))
             return
         if not np.all(np.isfinite(self.pts3d[src])):
-            self.statusBar().showMessage(f"{label} 含无效关节,无法复制。")
+            self.statusBar().showMessage(tr('{} 含无效关节,无法复制。').format(label))
             return
         self._push_undo()
         self.pts3d[pidx] = self.pts3d[src].copy()
@@ -2977,8 +2899,7 @@ class SkeletonCorrector(QMainWindow):
             self._refresh_kf_list()
         self._show_frame()
         self.statusBar().showMessage(
-            f"已把{label}的骨骼复制到当前帧 skel {pidx} 并设为关键帧。"
-            f"现在微调即可;Ctrl+Z 撤销。")
+            tr('已把{}的骨骼复制到当前帧 skel {} 并设为关键帧。现在微调即可;Ctrl+Z 撤销。').format(label, pidx))
 
     def _add_keyframe(self) -> None:
         """Add the current frame as a keyframe AND anchor the joints you're
@@ -2997,7 +2918,7 @@ class SkeletonCorrector(QMainWindow):
             self._push_undo()
         seeded = ""
         if new_kf and self.seed_kf_cb.isChecked() and self._seed_keyframe(pidx):
-            seeded = " (已用插值预填,可直接微调)"
+            seeded = tr(' (已用插值预填,可直接微调)')
         if new_kf:
             self._keyframes.append(pidx)
             self._keyframes.sort()
@@ -3015,22 +2936,20 @@ class SkeletonCorrector(QMainWindow):
         self._show_frame()
         if anchored:
             self.statusBar().showMessage(
-                f"关键帧 skel {pidx}:已锚定 {len(anchored)} 个已编辑关节"
-                f"(用当前姿态){seeded} —— 它们的插值会穿过这一帧。")
+                tr('关键帧 skel {}:已锚定 {} 个已编辑关节(用当前姿态){} —— 它们的插值会穿过这一帧。').format(pidx, len(anchored), seeded))
         elif new_kf:
             self.statusBar().showMessage(
-                f"已添加关键帧 skel {pidx}{seeded}。提示:先拖动要修正的关节,"
-                f"再在好帧上按 K,即可把它们锚定到原始姿态(无需再拖)。")
+                tr('已添加关键帧 skel {}{}。提示:先拖动要修正的关节,再在好帧上按 K,即可把它们锚定到原始姿态(无需再拖)。').format(pidx, seeded))
         else:
             self.statusBar().showMessage(
-                f"关键帧 skel {pidx} 已存在(当前没有已编辑关节可锚定)。")
+                tr('关键帧 skel {} 已存在(当前没有已编辑关节可锚定)。').format(pidx))
 
     def _apply_post_smooth(self) -> None:
         """One-shot post-annotation smoothing on the edited joints: median
         de-spike + speed-adaptive One-Euro (jitter smoothed, fast motion kept)."""
         if self.pts3d is None or not self.edited_joints:
             QMessageBox.information(
-                self, "平滑后处理", "没有'已编辑关节'可处理。先拖动/填充一些关节。")
+                self, tr('平滑后处理'), tr("没有'已编辑关节'可处理。先拖动/填充一些关节。"))
             return
         kfs = sorted(self._keyframes)
         fa, fb = (kfs[0], kfs[-1]) if len(kfs) >= 2 else (0, self.pts3d.shape[0] - 1)
@@ -3044,10 +2963,8 @@ class SkeletonCorrector(QMainWindow):
             min_cutoff=1.0 / strength, beta=3.0)
         self._show_frame()
         QMessageBox.information(
-            self, "平滑后处理完成",
-            f"已对 {len(joints)} 个已编辑关节 / skel[{fa}..{fb}] 做"
-            f"{'去尖刺+' if self.post_despike.isChecked() else ''}自适应平滑"
-            f"(强度 {strength:g})。\n快速动作已保留;不满意可撤销。")
+            self, tr('平滑后处理完成'),
+            tr('已对 {} 个已编辑关节 / skel[{}..{}] 做{}自适应平滑(强度 {:g})。\n快速动作已保留;不满意可撤销。').format(len(joints), fa, fb, tr('去尖刺+') if self.post_despike.isChecked() else '', strength))
 
     def _apply_bone_constraint(self) -> None:
         """Enforce reference (median) bone lengths over the keyframe range (or
@@ -3055,8 +2972,8 @@ class SkeletonCorrector(QMainWindow):
         if self.pts3d is None:
             return
         if self.pts3d.shape[1] != 24:
-            QMessageBox.information(self, "骨长约束",
-                                   "当前骨架不是 SMPL-24,暂不支持骨长约束。")
+            QMessageBox.information(self, tr('骨长约束'),
+                                   tr('当前骨架不是 SMPL-24,暂不支持骨长约束。'))
             return
         kfs = sorted(self._keyframes)
         fa, fb = (kfs[0], kfs[-1]) if len(kfs) >= 2 else (0, self.pts3d.shape[0] - 1)
@@ -3068,9 +2985,8 @@ class SkeletonCorrector(QMainWindow):
             frame_a=fa, frame_b=fb)
         self._show_frame()
         QMessageBox.information(
-            self, "骨长约束完成",
-            f"已对 skel[{fa}..{fb}] 按中位骨长(强度 {strength:g})约束。\n"
-            "保持了关节朝向,只改骨长;不满意可撤销。")
+            self, tr('骨长约束完成'),
+            tr('已对 skel[{}..{}] 按中位骨长(强度 {:g})约束。\n保持了关节朝向,只改骨长;不满意可撤销。').format(fa, fb, strength))
 
     def _fix_hands(self) -> None:
         """One-click rigid hands: lock L/R hand (22/23) onto the forearm line at
@@ -3078,17 +2994,15 @@ class SkeletonCorrector(QMainWindow):
         if self.pts3d is None:
             return
         if self.pts3d.shape[1] != 24:
-            QMessageBox.information(self, "修复手部",
-                                    "当前骨架不是 SMPL-24,暂不支持。")
+            QMessageBox.information(self, tr('修复手部'),
+                                    tr('当前骨架不是 SMPL-24,暂不支持。'))
             return
         self._push_undo()
         self.pts3d, n = rigid_extend_hands(self.pts3d)
         self._show_frame()
         QMessageBox.information(
-            self, "修复手部完成",
-            f"已把左右手固定为小臂的刚性延长(共线、恒定手长),"
-            f"整段共调整 {n} 处。\n之后若再插值/平滑改动了手肘或手腕,"
-            f"重按一次即可重新对齐;可 Ctrl+Z 撤销。")
+            self, tr('修复手部完成'),
+            tr('已把左右手固定为小臂的刚性延长(共线、恒定手长),整段共调整 {} 处。\n之后若再插值/平滑改动了手肘或手腕,重按一次即可重新对齐;可 Ctrl+Z 撤销。').format(n))
 
     def _seed_keyframe(self, pidx: int) -> bool:
         """Pre-fill frame *pidx* with the value interpolated from existing
@@ -3133,19 +3047,18 @@ class SkeletonCorrector(QMainWindow):
         Asks once (not undoable via Ctrl+Z, which only restores poses)."""
         n = len(self._keyframes)
         if n == 0 and not self._kf_joints:
-            self.statusBar().showMessage("没有关键帧可清空。")
+            self.statusBar().showMessage(tr('没有关键帧可清空。'))
             return
         ans = QMessageBox.question(
-            self, "确认",
-            f"清空全部 {n} 个关键帧(及其逐关节标记)?\n"
-            "不影响已调整的骨架姿态,只是清掉关键帧,之后可重新标。",
+            self, tr('确认'),
+            tr('清空全部 {} 个关键帧(及其逐关节标记)?\n不影响已调整的骨架姿态,只是清掉关键帧,之后可重新标。').format(n),
             QMessageBox.Yes | QMessageBox.No)
         if ans != QMessageBox.Yes:
             return
         self._keyframes.clear()
         self._kf_joints.clear()
         self._refresh_kf_list()
-        self.statusBar().showMessage(f"已清空 {n} 个关键帧(骨架姿态保持不变)。")
+        self.statusBar().showMessage(tr('已清空 {} 个关键帧(骨架姿态保持不变)。').format(n))
 
     def _on_kf_clicked(self, item) -> None:
         kfs = sorted(self._keyframes)
@@ -3214,14 +3127,12 @@ class SkeletonCorrector(QMainWindow):
         touched = set(counts) | {int(j) for j in self.edited_joints}
         skipped = sorted(j for j in touched if 0 <= j < J and j not in jk)
         skip_note = ("" if not skipped else
-                     f"\n\n⚠ 未插值(只有 1 个关键帧,需 ≥2): 关节 {skipped}\n"
-                     f"   在另一帧再拖一次这些关节(或加关键帧)即可让它们也连起来。")
+                     tr('\n\n⚠ 未插值(只有 1 个关键帧,需 ≥2): 关节 {}\n   在另一帧再拖一次这些关节(或加关键帧)即可让它们也连起来。').format(skipped))
 
         if not jk:
             QMessageBox.information(
-                self, "插值",
-                "没有可插值的关节。\n每个关节需要在 ≥2 个关键帧上被拖动过,"
-                "才能在它们之间插值。" + skip_note)
+                self, tr('插值'),
+                tr('没有可插值的关节。\n每个关节需要在 ≥2 个关键帧上被拖动过,才能在它们之间插值。') + skip_note)
             return
 
         if not has_orig:
@@ -3244,18 +3155,12 @@ class SkeletonCorrector(QMainWindow):
         self.pts3d = out
         self._show_frame()
         npins = sum(len(fs) for fs in jk.values())
-        mode_desc = ("offset(默认): 保留原始身体运动(下蹲/跳等)+ 叠加你的修正;"
-                     "若某『本来对的』帧被甩飞,在那帧补一个关键帧即可"
+        mode_desc = (tr('offset(默认): 保留原始身体运动(下蹲/跳等)+ 叠加你的修正;若某『本来对的』帧被甩飞,在那帧补一个关键帧即可')
                      if mode == "offset" else
-                     "replace: 关键帧之间走直线穿过你的姿态,丢弃原始运动 ——"
-                     "没标关键帧的运动会被压平(下蹲会变站着),仅修坏数据段时用")
+                     tr('replace: 关键帧之间走直线穿过你的姿态,丢弃原始运动 ——没标关键帧的运动会被压平(下蹲会变站着),仅修坏数据段时用'))
         QMessageBox.information(
-            self, "插值(逐关节·累积)",
-            f"已对 {len(jk)} 个关节(各 ≥2 关键帧)在其关键帧之间插值"
-            f"(共 {npins} 个关键点,σ≤{sig:.1f})。\n\n"
-            f"模式:{mode_desc}\n\n"
-            f"逐关节累积:只修改你给该关节标过关键帧的区间;这次没碰的关节、"
-            f"以及之前已标好的其它关节都保持不变。" + skip_note)
+            self, tr('插值(逐关节·累积)'),
+            tr('已对 {} 个关节(各 ≥2 关键帧)在其关键帧之间插值(共 {} 个关键点,σ≤{:.1f})。\n\n模式:{}\n\n逐关节累积:只修改你给该关节标过关键帧的区间;这次没碰的关节、以及之前已标好的其它关节都保持不变。').format(len(jk), npins, sig, mode_desc) + skip_note)
 
     # ------------------------------------------------ camera-guided fill
     def _camera_guided_fill(self) -> None:
@@ -3271,10 +3176,10 @@ class SkeletonCorrector(QMainWindow):
         if self.pts3d is None:
             return
         if len(self._keyframes) < 2:
-            QMessageBox.information(self, "相机引导填充", "至少需要 2 个关键帧。")
+            QMessageBox.information(self, tr('相机引导填充'), tr('至少需要 2 个关键帧。'))
             return
         if not self.calibs or not self.caps:
-            QMessageBox.information(self, "相机引导填充", "当前场景没有可用的相机/标定。")
+            QMessageBox.information(self, tr('相机引导填充'), tr('当前场景没有可用的相机/标定。'))
             return
         # Available, fully-calibrated views; put the two selected ones first so a
         # good pair anchors depth, then add the rest (capped for speed).
@@ -3290,8 +3195,8 @@ class SkeletonCorrector(QMainWindow):
         cams = list(dict.fromkeys(sel + avail))[:3]
         if len(cams) < 2:
             QMessageBox.information(
-                self, "相机引导填充",
-                "需要至少 2 个带外参的相机才能三角化。")
+                self, tr('相机引导填充'),
+                tr('需要至少 2 个带外参的相机才能三角化。'))
             return
         det_model = self._ensure_pose_model_fast()
         if det_model is None:
@@ -3312,16 +3217,15 @@ class SkeletonCorrector(QMainWindow):
         CONF = pose2d.CONF_THRESH
         GATE_PX = 30.0                      # reject triangulations worse than this
 
-        prog = self._make_progress("相机引导填充",
-                                   "读取并检测 2D 姿态...", len(cams))
+        prog = self._make_progress(tr('相机引导填充'),
+                                   tr('读取并检测 2D 姿态...'), len(cams))
         det: dict[str, dict[int, tuple]] = {}
         try:
             for ci, cam in enumerate(cams):
                 if prog.wasCanceled():
                     prog.close()
                     return
-                prog.setLabelText(f"检测 {cam} ({ci + 1}/{len(cams)}, "
-                                  f"{len(vframes)} 帧)")
+                prog.setLabelText(tr('检测 {} ({}/{}, {} 帧)').format(cam, ci + 1, len(cams), len(vframes)))
                 prog.setValue(ci)
                 QApplication.processEvents()
                 frames = self._read_cam_frames_seq(cam, vframes)
@@ -3395,24 +3299,18 @@ class SkeletonCorrector(QMainWindow):
                  "neck", "L_collar", "R_collar", "head", "L_shoulder",
                  "R_shoulder", "L_elbow", "R_elbow", "L_wrist", "R_wrist",
                  "L_hand", "R_hand"]
-        driven = ", ".join(names[j] for j in sorted(used)) or "(无)"
+        driven = ", ".join(names[j] for j in sorted(used)) or tr('(无)')
         fellback = [names[j] for j in camera_guided.CAMERA_DRIVEN
                     if j < 24 and j not in used]
         QMessageBox.information(
-            self, "相机引导填充",
-            f"已用 {len(cams)} 路相机 ({', '.join(cams)}) 填充 "
-            f"skel[{fa}..{fb}]。\n"
-            f"检测到姿态的视频帧: {n_det_frames}/{len(vframes)}\n"
-            f"相机修正的关节(横向): {driven}\n"
-            f"回退到原始(看不清)的关节: {', '.join(fellback) or '(无)'}\n"
-            f"深度方向保持源骨架(防外翻);边界缓入 {margin} 帧,与前后衔接。\n"
-            f"如个别中间帧仍偏,可在该处加一个关键帧再跑。")
+            self, tr('相机引导填充'),
+            tr('已用 {} 路相机 ({}) 填充 skel[{}..{}]。\n检测到姿态的视频帧: {}/{}\n相机修正的关节(横向): {}\n回退到原始(看不清)的关节: {}\n深度方向保持源骨架(防外翻);边界缓入 {} 帧,与前后衔接。\n如个别中间帧仍偏,可在该处加一个关键帧再跑。').format(len(cams), ', '.join(cams), fa, fb, n_det_frames, len(vframes), driven, ', '.join(fellback) or tr('(无)'), margin))
 
     # ---------------------------------------------------------- smoothing
     def _apply_smoothing(self) -> None:
         if self.pts3d is None or not self.edited_joints:
             QMessageBox.information(
-                self, "平滑", "没有'已编辑关节'可平滑。先拖动一些关节。")
+                self, tr('平滑'), tr("没有'已编辑关节'可平滑。先拖动一些关节。"))
             return
         win = self.smooth_win.value()
         if win % 2 == 0:
@@ -3439,8 +3337,8 @@ class SkeletonCorrector(QMainWindow):
             affected.append(j)
         self._show_frame()
         QMessageBox.information(
-            self, "平滑",
-            f"已对关节 {affected} 在 {win}-帧高斯窗口上做平滑。")
+            self, tr('平滑'),
+            tr('已对关节 {} 在 {}-帧高斯窗口上做平滑。').format(affected, win))
 
     def _on_cam_changed(self, _text: str = "") -> None:
         self._sync_vo_spins()
@@ -3637,6 +3535,54 @@ class SkeletonCorrector(QMainWindow):
         row = self.action_list.currentRow() + delta
         if 0 <= row < self.action_list.count():
             self.action_list.setCurrentRow(row)
+
+    # --------------------------------------------------------- language
+    def _toggle_language(self) -> None:
+        """Flip the UI language (persisted) and retranslate live."""
+        i18n.toggle_lang()
+        self._lang_btn.setText("EN" if i18n.get_lang() == "zh" else "中文")
+        self._retranslate_ui()
+        self.statusBar().showMessage(
+            "界面语言: 中文" if i18n.get_lang() == "zh" else "UI language: English")
+
+    def _retranslate_ui(self) -> None:
+        """Flip every STATIC text/tooltip to the active language in place.
+
+        Static texts were rendered in the previous language at construction;
+        i18n.retranslate maps them exactly (both directions). Dynamic
+        (formatted) texts won't match the table — they are simply regenerated
+        below and come out in the new language via tr()."""
+        t = i18n.retranslate(self.windowTitle())
+        if t:
+            self.setWindowTitle(t)
+        for w in self.findChildren(QWidget):
+            tt = w.toolTip()
+            if tt:
+                nt = i18n.retranslate(tt)
+                if nt:
+                    w.setToolTip(nt)
+            if isinstance(w, (QLabel, QPushButton, QCheckBox)):
+                nt = i18n.retranslate(w.text())
+                if nt:
+                    w.setText(nt)
+            elif isinstance(w, QGroupBox):
+                nt = i18n.retranslate(w.title())
+                if nt:
+                    w.setTitle(nt)
+        for m in self.menuBar().findChildren(QMenu):
+            nt = i18n.retranslate(m.title())
+            if nt:
+                m.setTitle(nt)
+        for a in self.findChildren(QAction):
+            nt = i18n.retranslate(a.text())
+            if nt:
+                a.setText(nt)
+        # Regenerate the dynamic texts in the new language.
+        self._update_undo_lbl()
+        self._refresh_kf_list()
+        self._refresh_edited_list()
+        if self.pts3d is not None:
+            self._show_frame()
 
     # --------------------------------------------------------- shutdown
     def closeEvent(self, event):  # noqa: N802
