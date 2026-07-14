@@ -12,11 +12,13 @@ FPS-aware: video frames map to skeleton (CSV) frames via ratio.
 """
 from __future__ import annotations
 
+import gc
 import json
 import os
 import pickle
 import re
 import sys
+from collections import OrderedDict
 
 # Pre-load onnxruntime (RTMPose backend) before PyQt5 — see main.py for why
 # (Windows Qt clobbers native DLL loading). Best-effort; safe if absent.
@@ -117,8 +119,14 @@ class SkeletonCorrector(QMainWindow):
         self._actions: list[dict] = []
         self._cur_action_idx: int = -1
 
-        # Decoded-frame cache for the current action: {(cam, src_fi): np.ndarray}
-        self._frame_cache: dict[tuple[str, int], np.ndarray] = {}
+        # Decoded-frame LRU cache for the current action, bounded by BYTES —
+        # a 720p BGR frame is ~2.7 MB, so a frame-count bound (the old 600 ≈
+        # 1.6 GB!) exhausts commit memory alongside the ONNX pose models and
+        # 7 open FFmpeg captures. Oldest entries are evicted to stay under
+        # budget; hits are refreshed (true LRU), never a full clear-all.
+        self.FRAME_CACHE_MB = 300
+        self._frame_cache: "OrderedDict[tuple[str, int], np.ndarray]" = OrderedDict()
+        self._frame_cache_bytes: int = 0
 
         # Per-camera view offset (small integer, shifts video read position)
         self._view_offsets: dict[str, int] = {}  # {cam_name: offset_frames}
@@ -821,7 +829,7 @@ class SkeletonCorrector(QMainWindow):
         for c in self.caps.values():
             c.release()
         self.caps.clear()
-        self._frame_cache.clear()
+        self._clear_frame_cache()
         self._mosh_kind_cache.clear()
         clear_projection_cache()
 
@@ -1077,7 +1085,7 @@ class SkeletonCorrector(QMainWindow):
         # Release old caps, reset per-action caches, open new caps.
         for c in self.caps.values():
             c.release()
-        self._frame_cache.clear()
+        self._clear_frame_cache()
         self._cap_totals.clear()
         caps: dict[str, cv2.VideoCapture] = {}
         vfps = 30.0
@@ -1433,7 +1441,7 @@ class SkeletonCorrector(QMainWindow):
         self._kf_joints.clear()
         self._tv2d.clear()
         self.undo_stack.clear()
-        self._frame_cache.clear()
+        self._clear_frame_cache()
         self._cap_totals.clear()
         caps, min_vtot = {}, 10 ** 9
         for cn, p in act["videos"].items():
@@ -1759,6 +1767,26 @@ class SkeletonCorrector(QMainWindow):
         cv2.putText(frm, "KEYFRAME", (32, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     (0, 0, 0), 2, cv2.LINE_AA)
 
+    def _clear_frame_cache(self) -> None:
+        self._frame_cache.clear()
+        self._frame_cache_bytes = 0
+
+    def _cache_put(self, key, frm: np.ndarray) -> None:
+        """Insert into the LRU frame cache, evicting oldest entries to stay
+        under the byte budget (never a clear-all — that kills scrubbing)."""
+        budget = self.FRAME_CACHE_MB * 1024 * 1024
+        nb = int(frm.nbytes)
+        if nb > budget:
+            return                              # absurdly large frame: skip
+        old = self._frame_cache.pop(key, None)
+        if old is not None:
+            self._frame_cache_bytes -= int(old.nbytes)
+        while self._frame_cache and self._frame_cache_bytes + nb > budget:
+            _, ev = self._frame_cache.popitem(last=False)
+            self._frame_cache_bytes -= int(ev.nbytes)
+        self._frame_cache[key] = frm
+        self._frame_cache_bytes += nb
+
     def _read_cam_frame(self, cam: str, fi: int) -> np.ndarray:
         cap = self.caps.get(cam) if cam else None
         if cap is None:
@@ -1772,29 +1800,42 @@ class SkeletonCorrector(QMainWindow):
         key = (cam, src_fi)
         cached = self._frame_cache.get(key)
         if cached is not None:
+            self._frame_cache.move_to_end(key)   # LRU refresh
             return cached
-        cap.set(cv2.CAP_PROP_POS_FRAMES, src_fi)
-        ret, frm = cap.read()
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, src_fi)
+            ret, frm = cap.read()
+        except (MemoryError, cv2.error):
+            # Out of memory mid-decode: drop our biggest pool and retry once
+            # instead of crashing the app.
+            self._clear_frame_cache()
+            gc.collect()
+            try:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, src_fi)
+                ret, frm = cap.read()
+            except (MemoryError, cv2.error):
+                return np.zeros((480, 640, 3), dtype=np.uint8)
         if not ret or frm is None:
             return np.zeros((480, 640, 3), dtype=np.uint8)
-        # Bound the cache so memory stays modest (~a few hundred frames).
-        if len(self._frame_cache) > 600:
-            self._frame_cache.clear()
-        self._frame_cache[key] = frm
+        self._cache_put(key, frm)
         return frm
 
-    def _read_cam_frames_seq(self, cam: str, vframes) -> dict:
-        """Read several video frames of *cam* by decoding FORWARD once.
+    def _read_cam_frames_seq(self, cam: str, vframes):
+        """Iterate ``(vframe, BGR)`` over *vframes*, decoding FORWARD once.
 
         ``cap.set(POS_FRAMES)`` re-decodes from the nearest keyframe every call,
         so reading a span frame-by-frame via _read_cam_frame is O(n·keyframe).
         Here we seek once to the first needed frame and ``grab()`` straight
-        through, only ``retrieve()``-ing the ones we want. Returns {vframe: BGR}.
+        through, only ``retrieve()``-ing the ones we want.
+
+        GENERATOR on purpose: a long clip's decoded 720p span is hundreds of
+        MB; materialising it as a dict (old behaviour), on top of the ONNX pose
+        models, exhausted commit memory (OOM crash while filling). Streaming
+        keeps exactly ONE decoded frame alive at a time.
         """
         cap = self.caps.get(cam) if cam else None
-        out: dict[int, np.ndarray] = {}
         if cap is None or not vframes:
-            return out
+            return
         off = self._view_offsets.get(cam, 0)
         tot = self._cap_totals.get(cam) or int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         want = {}                                   # src frame -> requested vframe
@@ -1803,7 +1844,7 @@ class SkeletonCorrector(QMainWindow):
             if 0 <= s < tot:
                 want[s] = v
         if not want:
-            return out
+            return
         srcs = sorted(want)
         cap.set(cv2.CAP_PROP_POS_FRAMES, srcs[0])
         cur, last = srcs[0], srcs[-1]
@@ -1815,9 +1856,8 @@ class SkeletonCorrector(QMainWindow):
             if cur in need:
                 ok, frm = cap.retrieve()
                 if ok and frm is not None:
-                    out[want[cur]] = frm
+                    yield want[cur], frm
             cur += 1
-        return out
 
     def _draw_ghost(self, frm, intr, extr, pidx_ghost: int, color: tuple) -> None:
         """Faint thin skeleton of another frame's pose (onion-skin)."""
@@ -3228,9 +3268,11 @@ class SkeletonCorrector(QMainWindow):
                 prog.setLabelText(tr('检测 {} ({}/{}, {} 帧)').format(cam, ci + 1, len(cams), len(vframes)))
                 prog.setValue(ci)
                 QApplication.processEvents()
-                frames = self._read_cam_frames_seq(cam, vframes)
+                # Stream frames -> detect immediately -> keep only keypoints.
+                # Only one decoded frame is alive at a time (see the generator's
+                # docstring: the dict-of-frames version OOM'd on long clips).
                 dd: dict[int, tuple] = {}
-                for v, frm in frames.items():
+                for v, frm in self._read_cam_frames_seq(cam, vframes):
                     r = det_model.detect(frm)
                     if r is not None:
                         dd[v] = r            # (xy(17,2), conf(17,))
