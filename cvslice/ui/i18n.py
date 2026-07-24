@@ -257,10 +257,17 @@ EN: dict[str, str] = {
     "骨骼时间:": "Skeleton time:",
     "上视图:": "Top view:",
     "下视图:": "Bottom view:",
-    "骨骼时间: 整体平移骨骼帧对齐视频(范围=整段长度)。\n上/下视图: 各相机微调。\n超出范围的帧会被裁掉。":
+    "骨骼时间: 整体平移骨骼帧对齐视频(范围=整段长度)。\n上/下视图: 各相机微调。\n裁掉开头/结尾: 掐掉所有片段头尾的多余帧(准备动作等)。\n超出范围的帧会被裁掉。":
         "Skeleton time: shift all skeleton frames to align with the video "
         "(range = clip length).\nTop/bottom view: per-camera fine offset.\n"
-        "Frames pushed out of range are trimmed.",
+        "Trim head/tail: cut extra lead-in/lead-out frames from ALL clips "
+        "(setup poses etc.).\nFrames pushed out of range are trimmed.",
+    "裁掉开头:": "Trim head:",
+    "裁掉结尾:": "Trim tail:",
+    "裁头/裁尾对骨架+所有视角同时生效:改动立即反映在播放范围(所见即所存),按下方「裁切对齐」才真正写入 pkl 和视频。":
+        "Head/tail trims apply to the skeleton + every view together: the "
+        "playable range updates immediately (what you see is what gets "
+        "saved); press Trim-align below to physically write pkl + videos.",
     "✂️ 裁切对齐 (pkl + 所有视频, 原地)": "✂️ Trim-align (pkl + all videos, in place)",
     "最终烘焙: 按『最晚开头/最早结尾』的交集窗口(跨所有视角+骨架),把 pkl 裁切写入 _edited.pkl,并按各视角自己的 offset 原地裁切所有源 MP4 (首次自动 .bak 备份),使 pkl 与每个视角逐帧同步。\n⚠ 会覆盖源视频(.bak 可恢复),是最终一次性操作。":
         "Final bake: using the intersection window (latest start / earliest "

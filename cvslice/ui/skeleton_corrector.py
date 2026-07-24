@@ -136,6 +136,11 @@ class SkeletonCorrector(QMainWindow):
         # a fixed cap.
         self._skel_offset: int = 0
         self._off_bound: int = 1000  # offset spin range (±); per-clip on load
+        # Manual head/tail trim (video frames): cut lead-in/lead-out junk from
+        # ALL views + skeleton together. Narrows the playable window right away
+        # (WYSIWYG) and is baked physically by 裁切对齐 along with the offsets.
+        self._trim_head: int = 0
+        self._trim_tail: int = 0
         self._raw_vtotal: int = 0  # original video frame count before trimming
 
         # Persisted progress (per action tag), loaded from corrector_progress.json
@@ -604,7 +609,22 @@ class SkeletonCorrector(QMainWindow):
         self.vo_bot_spin.setValue(0)
         self.vo_bot_spin.valueChanged.connect(self._on_view_offset_changed)
         vof.addRow(tr('下视图:'), self.vo_bot_spin)
-        vo_g.setToolTip(tr('骨骼时间: 整体平移骨骼帧对齐视频(范围=整段长度)。\n上/下视图: 各相机微调。\n超出范围的帧会被裁掉。'))
+        self.trim_head_spin = QSpinBox()
+        self.trim_head_spin.setRange(0, self._off_bound)
+        self.trim_head_spin.setValue(0)
+        self.trim_head_spin.valueChanged.connect(self._on_trim_changed)
+        vof.addRow(tr('裁掉开头:'), self.trim_head_spin)
+        self.trim_tail_spin = QSpinBox()
+        self.trim_tail_spin.setRange(0, self._off_bound)
+        self.trim_tail_spin.setValue(0)
+        self.trim_tail_spin.valueChanged.connect(self._on_trim_changed)
+        vof.addRow(tr('裁掉结尾:'), self.trim_tail_spin)
+        trim_hint = QLabel(tr('裁头/裁尾对骨架+所有视角同时生效:改动立即反映在播放范围'
+                              '(所见即所存),按下方「裁切对齐」才真正写入 pkl 和视频。'))
+        trim_hint.setWordWrap(True)
+        trim_hint.setStyleSheet("color:#888; font-size:11px;")
+        vof.addRow(trim_hint)
+        vo_g.setToolTip(tr('骨骼时间: 整体平移骨骼帧对齐视频(范围=整段长度)。\n上/下视图: 各相机微调。\n裁掉开头/结尾: 掐掉所有片段头尾的多余帧(准备动作等)。\n超出范围的帧会被裁掉。'))
         bake_btn = QPushButton(tr('✂️ 裁切对齐 (pkl + 所有视频, 原地)'))
         bake_btn.setStyleSheet("font-weight:bold;")
         bake_btn.setToolTip(
@@ -1198,6 +1218,11 @@ class SkeletonCorrector(QMainWindow):
                 self._view_offsets[cn] = max(-b, min(b, int(off)))
             except (TypeError, ValueError):
                 pass
+        try:
+            self._trim_head = max(0, min(b, int(saved.get("trim_head", 0))))
+            self._trim_tail = max(0, min(b, int(saved.get("trim_tail", 0))))
+        except (TypeError, ValueError):
+            self._trim_head = self._trim_tail = 0
         for j in saved.get("edited_joints", []):
             if isinstance(j, int) and 0 <= j < pts3d.shape[1]:
                 self.edited_joints.add(j)
@@ -1238,6 +1263,11 @@ class SkeletonCorrector(QMainWindow):
         self.skel_off_spin.blockSignals(True)
         self.skel_off_spin.setValue(self._skel_offset)
         self.skel_off_spin.blockSignals(False)
+        for sp, v in ((self.trim_head_spin, self._trim_head),
+                      (self.trim_tail_spin, self._trim_tail)):
+            sp.blockSignals(True)
+            sp.setValue(v)
+            sp.blockSignals(False)
 
         # Populate camera combos, preserving the current top/bottom selection
         # across action (and scene) switches when those cameras still exist.
@@ -1489,10 +1519,17 @@ class SkeletonCorrector(QMainWindow):
         self.skel_off_spin.blockSignals(True)
         self.skel_off_spin.setValue(0)
         self.skel_off_spin.blockSignals(False)
+        # Head/tail trims are baked into the files now — reset to 0.
+        self._trim_head = self._trim_tail = 0
+        for sp in (self.trim_head_spin, self.trim_tail_spin):
+            sp.blockSignals(True)
+            sp.setValue(0)
+            sp.blockSignals(False)
         # Frames are re-indexed now; the stored offsets/keyframes are stale.
         self._progress[tag] = {**self._progress.get(tag, {}), "skel_offset": 0,
                                "view_offsets": {}, "keyframes": [],
-                               "edited_joints": []}
+                               "edited_joints": [], "kf_joints": {},
+                               "trim_head": 0, "trim_tail": 0}
         self._write_progress_json()
         self.timeline = Timeline(trimmed.shape[0], self.vtotal, self.vfps)
         self.cur_frame = 0
@@ -1635,6 +1672,8 @@ class SkeletonCorrector(QMainWindow):
         entry = {
             "source": self._skel_source,
             "skel_offset": int(self._skel_offset),
+            "trim_head": int(self._trim_head),
+            "trim_tail": int(self._trim_tail),
             "view_offsets": {k: int(v) for k, v in self._view_offsets.items()},
             "edited_joints": sorted(self.edited_joints),
             "keyframes": sorted(int(k) for k in self._keyframes),
@@ -3428,11 +3467,23 @@ class SkeletonCorrector(QMainWindow):
             sp.blockSignals(True)
             sp.setRange(-self._off_bound, self._off_bound)
             sp.blockSignals(False)
+        for sp in (self.trim_head_spin, self.trim_tail_spin):
+            sp.blockSignals(True)
+            sp.setRange(0, self._off_bound)
+            sp.blockSignals(False)
 
     def _on_skel_offset_changed(self, val: int = 0) -> None:
         """Shift the skeleton in time relative to the video (range = clip length)."""
         self._skel_offset = int(val)   # spinbox range already bounds val
         self._recalc_play_range()   # skel offset changes the skeleton's valid range
+        self._show_frame()
+
+    def _on_trim_changed(self, _val: int = 0) -> None:
+        """Head/tail trim changed: narrow the playable window immediately
+        (WYSIWYG — 裁切对齐 later bakes exactly this window into pkl+videos)."""
+        self._trim_head = int(self.trim_head_spin.value())
+        self._trim_tail = int(self.trim_tail_spin.value())
+        self._recalc_play_range()
         self._show_frame()
 
     def _on_view_offset_changed(self, _val: int = 0) -> None:
@@ -3453,11 +3504,15 @@ class SkeletonCorrector(QMainWindow):
         offset-shifted read ``fi + off`` must land in ``[0, cam_total-1]``, and
         the skeleton frame ``round((fi + skel_offset) * ratio)`` must land in
         ``[0, n_skel-1]`` WITHOUT clamping. Result: no view shows a black frame
-        and the skeleton never holds a duplicate frame at the ends."""
+        and the skeleton never holds a duplicate frame at the ends.
+
+        The manual head/tail trim narrows the window FIRST, so playback (and
+        the 裁切对齐 bake, which uses exactly this window) skips the junk
+        lead-in/lead-out frames — what you see is what gets saved."""
         raw = self._raw_vtotal
         if raw <= 0:
             return
-        lo, hi = 0, raw - 1
+        lo, hi = 0 + max(0, self._trim_head), raw - 1 - max(0, self._trim_tail)
         for cn, cap in self.caps.items():
             off = self._view_offsets.get(cn, 0)
             tot = self._cap_totals.get(cn) or int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
