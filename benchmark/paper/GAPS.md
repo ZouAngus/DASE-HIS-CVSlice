@@ -98,3 +98,22 @@ G7 终核时注意 H3.6M 用 "17 scenarios" 口径、mocap 帧率按视频同步
 
 **联动改动（待 G24 出数后执行）**：main.tex 摘要/贡献/对比表的 "seven cameras" 口径、
 X-View 协议定义、§3.5 加可见性统计、benchmark/ 增加 views.md v1 权威定义。
+
+## 2026-07-03 增补 3：动捕质量问题的论文叙事口径（决策记录）
+
+**背景**：LED CAVE 的安装特性导致动捕间歇性失稳（约 80% 时间有 1-2 条肢体形态偏差）。
+成因判断：(a) LED 面板结构使动捕相机只能低位近距安装（无法像 projector-based CAVE
+放高放远），覆盖余量不足；(b) 演员跑跳时相机支架震动导致外参漂移。
+
+**决议：写成"约束"，不写成"发现"。**
+
+1. **不**把 "CAVE mocap 失效" 作为论文主要内容或贡献点——风险是引导审稿人质疑
+   GT 可靠性，自拆精度族定位。
+2. 正文 §3 采集部分仅一段中性陈述（constrains / margins / intermittent 等工程措辞，
+   避免 unstable / failure），作用 = 解释为什么需要 §3.4 的重型验证流程。
+3. Limitations 一句话（低位安装为 LED CAVE 固有权衡）+ future work 一句话
+   （Round 3：刚性支撑、连续标定）。成因细节进 supplementary capture protocol。
+4. 修正比例数字（edit mask 统计）照常发布，叙事包装为 "verification 彻底性"。
+5. G20/G24 的可见性/遮挡统计客观上即为修正必要性的证据，不需要主观表述。
+6. 数据现实的执行结论（前次讨论已定）：测试集精修档、训练集粗修档（双速 SOP）、
+   只修坏肢体、per-frame edit mask 记录来源、G23 裁决粗修档是否够用。
