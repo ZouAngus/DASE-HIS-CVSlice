@@ -624,6 +624,59 @@ EN: dict[str, str] = {
     "已对关节 {} 在 {}-帧高斯窗口上做平滑。":
         "Smoothed joints {} with a {}-frame Gaussian window.",
 
+    # ---- CHANGES.md features (select-all / clipboards / commit / new rep) ----
+    "本帧全选关节": "Select all joints (this frame)",
+    "把当前帧所有有效关节按当前姿态锚定为关键帧(已全锚定则全部取消)。可 Ctrl+Z 撤销。":
+        "Anchor every valid joint on this frame at its current pose (toggles all off if already anchored). Undoable.",
+    "本帧没有有效关节可锚定。": "No valid joints to anchor on this frame.",
+    "已取消本帧全部关节锚定 (skel {})。": "Un-anchored all joints on this frame (skel {}).",
+    "已把本帧 {} 个关节按当前姿态锚定 (skel {})。":
+        "Anchored {} joints at their current pose (skel {}).",
+    "📋 复制本帧姿态": "📋 Copy this frame's pose",
+    "把当前帧整副骨架存入剪贴板,可粘贴到任意帧(如帧1→帧6)。":
+        "Copy the whole skeleton of this frame; paste it onto ANY other frame (e.g. 1 → 6).",
+    "📥 粘贴姿态到本帧": "📥 Paste pose here",
+    "把剪贴板里的整副姿态粘到当前帧并锚定为关键帧。可 Ctrl+Z 撤销。":
+        "Paste the clipboard pose onto this frame and anchor it as a keyframe. Undoable.",
+    "剪贴板为空 — 先「复制本帧姿态」。": "Clipboard empty — copy a pose first.",
+    "剪贴板骨架关节数与当前动作不一致,无法粘贴。":
+        "Clipboard joint count differs from this action — cannot paste.",
+    "已复制 skel {} 的整副姿态到剪贴板。": "Copied the full pose of skel {}.",
+    "已把剪贴板姿态粘到 skel {} 并锚定为关键帧。Ctrl+Z 撤销。":
+        "Pasted the clipboard pose onto skel {} and anchored it. Ctrl+Z undoes.",
+    "📋 复制选中关节 (本帧)": "📋 Copy selected joints (this frame)",
+    "只复制当前选中(已编辑)关节在本帧的位置。":
+        "Copy only the currently selected (edited) joints' positions on this frame.",
+    "📥 粘贴关节到本帧": "📥 Paste joints here",
+    "把复制的关节位置粘到当前帧的同名关节上,其余关节不动;粘贴的关节锚定为关键帧。可 Ctrl+Z 撤销。":
+        "Paste the copied joints onto the SAME joints of this frame; others untouched. Pasted joints are anchored. Undoable.",
+    "选中集为空 — 先点击关节或「本帧全选关节」。":
+        "Selection empty — click joints or 'select all on this frame' first.",
+    "关节剪贴板为空 — 先「复制选中关节」。": "Joint clipboard empty — copy joints first.",
+    "已复制关节 {} 在 skel {} 的位置。": "Copied joints {} at skel {}.",
+    "已把关节 {} 粘到 skel {} 并锚定。Ctrl+Z 撤销。":
+        "Pasted joints {} onto skel {} and anchored them. Ctrl+Z undoes.",
+    "提交本轮为新起点 (Commit pass)": "Commit pass (bake as new baseline)",
+    "没有改动可提交。": "Nothing to commit.",
+    " (已写 _edited.pkl)": " (_edited.pkl written)",
+    "已提交本轮为新起点{}: 关键帧/标记已并入历史记录并清空, 后续插值/还原以本轮为基线。Ctrl+Z 可整体回退。":
+        "Pass committed{}: keyframes/marks merged into provenance history and cleared; interpolation/reset now build on this pass. Ctrl+Z reverts the whole commit.",
+    "拆分新 rep (视频帧区间)": "Split new rep (video-frame range)",
+    "把当前动作的一段视频帧区间另存为一个全新动作(rep):每路相机各出一个裁切 MP4(按各自 view offset)、参考 CSV 切片、mosh 源另存当前(已编辑)骨架为新 *_stageii.pkl(重开自动挂载)。原动作不受影响。":
+        "Save a video-frame range of this action as a NEW action (rep): one trimmed MP4 per camera (each honoring its view offset), a sliced reference CSV, and — for mosh sources — the current (edited) skeleton slice as a new *_stageii.pkl (auto-attaches on reopen). The original action is untouched.",
+    "起点 = 当前帧": "Start = current frame",
+    "终点 = 当前帧": "End = current frame",
+    "➕ 另存新 rep": "➕ Save as new rep",
+    "拆分新 rep": "Split new rep",
+    "拆分失败: 区间无效(终点须大于起点)。": "Split failed: invalid range (end must be after start).",
+    "拆分失败: 当前动作没有参考 CSV。": "Split failed: this action has no reference CSV.",
+    "拆分失败: CSV 切片写入失败。": "Split failed: could not write the CSV slice.",
+    "已另存新 rep: {} (视频 {} 路 + CSV{}), 原动作未改动。":
+        "Saved new rep {} ({} camera videos + CSV{}); the original action is untouched.",
+    " + 骨架pkl": " + skeleton pkl",
+    "提示: {} 的 _edited.pkl 比源更长(疑似旧数据),已忽略。":
+        "Note: {}'s _edited.pkl is LONGER than the source (likely stale) — ignored.",
+
     "文件 ▸ 打开文件夹 加载导出目录 | 空格=播放 A/D=帧 W/S=动作 K=关键帧 I=IK N=可疑帧 [/]=区间 P=提议 (完整快捷键见 README)":
         "File ▸ Open folder to load an export | Space=play A/D=frame W/S=action K=keyframe I=IK N=suspect [/]=span P=propose (full shortcuts: README)",
 }

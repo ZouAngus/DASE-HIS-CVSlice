@@ -149,6 +149,11 @@ class SkeletonCorrector(QMainWindow):
         # In-memory edited skeletons per action tag, so edits survive action
         # switches and can be batch-saved. tag -> {"pts": ndarray, "source": key}
         self._edited: dict[str, dict] = {}
+        # Feature 4/5: pose & per-joint clipboards; Feature 3: committed passes.
+        self._pose_clip: np.ndarray | None = None
+        self._joint_clip: dict[int, np.ndarray] | None = None
+        self._joint_clip_nj: int = 0
+        self._committed: dict[str, np.ndarray] = {}
         # Tags finalized by 裁切对齐 (their _edited.pkl is trimmed); the auto-save
         # must NOT overwrite those with the full in-memory pose. Cleared on edit.
         self._exported: set[str] = set()
@@ -285,6 +290,10 @@ class SkeletonCorrector(QMainWindow):
         a_reset = QAction(tr('恢复到加载时'), self)
         a_reset.triggered.connect(self._reset_all)
         em.addAction(a_reset)
+        a_commit = QAction(tr('提交本轮为新起点 (Commit pass)'), self)
+        a_commit.setShortcut(QKeySequence("Ctrl+Return"))
+        a_commit.triggered.connect(self._commit_pass)
+        em.addAction(a_commit)
 
         tm = mb.addMenu(tr('工具'))
         a_report = QAction(tr('标定体检报告...'), self)
@@ -438,6 +447,10 @@ class SkeletonCorrector(QMainWindow):
         clr_btn.setToolTip(tr('清空编辑标记 + 全部逐关节锚点(姿态不变,但插值不会再动这些关节)。可 Ctrl+Z 撤销。'))
         clr_btn.clicked.connect(self._clear_edited)
         ej_btn_row.addWidget(clr_btn)
+        all_btn = QPushButton(tr('本帧全选关节'))
+        all_btn.setToolTip(tr('把当前帧所有有效关节按当前姿态锚定为关键帧(已全锚定则全部取消)。可 Ctrl+Z 撤销。'))
+        all_btn.clicked.connect(self._anchor_all_here)
+        ej_btn_row.addWidget(all_btn)
         ejl.addLayout(ej_btn_row)
         rp.addWidget(ej_g)
 
@@ -470,6 +483,26 @@ class SkeletonCorrector(QMainWindow):
         cp_k_btn.clicked.connect(lambda: self._copy_pose("kf"))
         copy_row.addWidget(cp_k_btn)
         kfl.addLayout(copy_row)
+        clip_row = QHBoxLayout()
+        cpp_btn = QPushButton(tr('📋 复制本帧姿态'))
+        cpp_btn.setToolTip(tr('把当前帧整副骨架存入剪贴板,可粘贴到任意帧(如帧1→帧6)。'))
+        cpp_btn.clicked.connect(self._copy_current_pose)
+        clip_row.addWidget(cpp_btn)
+        psp_btn = QPushButton(tr('📥 粘贴姿态到本帧'))
+        psp_btn.setToolTip(tr('把剪贴板里的整副姿态粘到当前帧并锚定为关键帧。可 Ctrl+Z 撤销。'))
+        psp_btn.clicked.connect(self._paste_pose)
+        clip_row.addWidget(psp_btn)
+        kfl.addLayout(clip_row)
+        jclip_row = QHBoxLayout()
+        cpj_btn = QPushButton(tr('📋 复制选中关节 (本帧)'))
+        cpj_btn.setToolTip(tr('只复制当前选中(已编辑)关节在本帧的位置。'))
+        cpj_btn.clicked.connect(self._copy_joints)
+        jclip_row.addWidget(cpj_btn)
+        psj_btn = QPushButton(tr('📥 粘贴关节到本帧'))
+        psj_btn.setToolTip(tr('把复制的关节位置粘到当前帧的同名关节上,其余关节不动;粘贴的关节锚定为关键帧。可 Ctrl+Z 撤销。'))
+        psj_btn.clicked.connect(self._paste_joints)
+        jclip_row.addWidget(psj_btn)
+        kfl.addLayout(jclip_row)
         self.kf_list = QListWidget()
         self.kf_list.setMaximumHeight(110)
         self.kf_list.itemClicked.connect(self._on_kf_clicked)
@@ -633,6 +666,34 @@ class SkeletonCorrector(QMainWindow):
         bake_btn.clicked.connect(self._trim_align_save)
         vof.addRow(bake_btn)
         lp.addWidget(vo_g)
+
+        # Feature 1: save a frame range of this action as a NEW rep.
+        tr_g = QGroupBox(tr('拆分新 rep (视频帧区间)'))
+        tr_g.setToolTip(tr('把当前动作的一段视频帧区间另存为一个全新动作(rep):每路相机各出一个裁切 MP4(按各自 view offset)、参考 CSV 切片、mosh 源另存当前(已编辑)骨架为新 *_stageii.pkl(重开自动挂载)。原动作不受影响。'))
+        trl = QVBoxLayout(tr_g)
+        tr_row = QHBoxLayout()
+        self.trim_lo_spin = QSpinBox()
+        self.trim_hi_spin = QSpinBox()
+        lo_here = QPushButton('⌖')
+        lo_here.setFixedWidth(28)
+        lo_here.setToolTip(tr('起点 = 当前帧'))
+        lo_here.clicked.connect(
+            lambda: self.trim_lo_spin.setValue(self.cur_frame))
+        hi_here = QPushButton('⌖')
+        hi_here.setFixedWidth(28)
+        hi_here.setToolTip(tr('终点 = 当前帧'))
+        hi_here.clicked.connect(
+            lambda: self.trim_hi_spin.setValue(self.cur_frame))
+        tr_row.addWidget(self.trim_lo_spin)
+        tr_row.addWidget(lo_here)
+        tr_row.addWidget(QLabel('–'))
+        tr_row.addWidget(self.trim_hi_spin)
+        tr_row.addWidget(hi_here)
+        trl.addLayout(tr_row)
+        rep_btn = QPushButton(tr('➕ 另存新 rep'))
+        rep_btn.clicked.connect(self._on_extract_rep)
+        trl.addWidget(rep_btn)
+        lp.addWidget(tr_g)
 
         # Calibration toolbox removed: diagonal was recalibrated at the source
         # (edge-covering board) so the empirical refine/report/triangulation/
@@ -1174,15 +1235,30 @@ class SkeletonCorrector(QMainWindow):
         # reset baseline and drop the (full-length) source, keeping pkl/videos
         # frame-aligned on reopen.
         ep = self._edited_pkl_path(act, used)
+        baked = False
+        stale_pkl = False
+        saved_pre = self._progress.get(act["tag"], {})
         if ep and os.path.exists(ep):
             try:
                 ep_pts, _ = load_mosh_pkl(ep, getattr(self._source, "which", "sim"))
                 ep_pts = np.asarray(ep_pts, dtype=np.float64)
                 if ep_pts.ndim == 3 and ep_pts.shape[1:] == self.pts3d.shape[1:]:
-                    self.pts3d = ep_pts.copy()
-                    if ep_pts.shape[0] != self.pts3d_orig.shape[0]:   # baked
-                        self.pts3d_orig = ep_pts.copy()
-                        self.pts3d_was_nan = None
+                    if ep_pts.shape[0] > self.pts3d_orig.shape[0]:
+                        # LONGER than the source: impossible from a trim ->
+                        # stale from an older, longer source. Ignore it.
+                        stale_pkl = True
+                    else:
+                        self.pts3d = ep_pts.copy()
+                        if ep_pts.shape[0] != self.pts3d_orig.shape[0]:  # baked
+                            baked = True
+                            self.pts3d_orig = ep_pts.copy()
+                            self.pts3d_was_nan = None
+                        elif saved_pre.get("baseline_committed"):
+                            # Same length + committed pass on record: the pkl
+                            # is the committed baseline, not just an edit.
+                            self.pts3d_orig = ep_pts.copy()
+                            self.pts3d_was_nan = None
+                            self._committed[act["tag"]] = ep_pts.copy()
             except Exception:
                 pass
         # An in-session edit (freshest) overrides the on-disk one.
@@ -1190,6 +1266,11 @@ class SkeletonCorrector(QMainWindow):
         if (cached is not None and cached.get("source") == used
                 and cached["pts"].shape == self.pts3d.shape):
             self.pts3d = cached["pts"].astype(np.float64).copy()
+        # In-session committed baseline (freshest) overrides the on-disk one.
+        com = self._committed.get(act["tag"])
+        if com is not None and com.shape == self.pts3d.shape:
+            self.pts3d_orig = com.copy()
+            self.pts3d_was_nan = None
         self.csv_fps = fps
         self.videos = act["videos"]
         self.caps = caps
@@ -1226,6 +1307,19 @@ class SkeletonCorrector(QMainWindow):
                 self._view_offsets[cn] = max(-b, min(b, int(off)))
             except (TypeError, ValueError):
                 pass
+        if baked:
+            # A baked pkl is frame-synced to its trimmed videos: leftover
+            # offsets would shift the aligned skeleton on every reopen (and
+            # be double-consumed by a second bake). Force 0 + self-heal json.
+            self._skel_offset = 0
+            self._view_offsets.clear()
+            self._progress[act["tag"]] = {
+                **self._progress.get(act["tag"], {}),
+                "skel_offset": 0, "view_offsets": {}}
+        if stale_pkl:
+            self.statusBar().showMessage(
+                tr('提示: {} 的 _edited.pkl 比源更长(疑似旧数据),已忽略。')
+                .format(act["tag"]))
         try:
             self._trim_head = max(0, min(b, int(saved.get("trim_head", 0))))
             self._trim_tail = max(0, min(b, int(saved.get("trim_tail", 0))))
@@ -1306,6 +1400,7 @@ class SkeletonCorrector(QMainWindow):
             self.cur_frame = keep_frame
         # Set the playable window (clamps cur_frame into it, sets slider range).
         self._recalc_play_range()
+        self._reset_trim_spins()
         self.slider.setValue(self.cur_frame)
         self._refresh_edited_list()
         self._refresh_kf_list()
@@ -1501,6 +1596,7 @@ class SkeletonCorrector(QMainWindow):
         self.pts3d_orig = trimmed.copy()
         self.pts3d_was_nan = None
         self._exported.add(tag)
+        self._committed.pop(tag, None)   # re-indexed frames: commit invalid
         self._edited.pop(tag, None)
         self.edited_joints.clear()
         self._keyframes.clear()
@@ -1687,6 +1783,7 @@ class SkeletonCorrector(QMainWindow):
             "keyframes": sorted(int(k) for k in self._keyframes),
             "kf_joints": {str(int(f)): sorted(int(j) for j in js)
                           for f, js in self._kf_joints.items() if js},
+            "baseline_committed": tag in self._committed,
         }
         self._progress[tag] = {**self._progress.get(tag, {}), **entry}
         # Cache the skeleton only if it actually differs from the loaded data;
@@ -2448,6 +2545,304 @@ class SkeletonCorrector(QMainWindow):
                 float(s1.value()), float(s2.value()))
         self.statusBar().showMessage(tr('IK 骨长已更新(仅本片段生效)。'))
 
+    # --------------------------------------------- CHANGES.md features
+    def _anchor_all_here(self) -> None:
+        """Anchor every valid joint on this frame as a keyframe (toggle off if
+        all are already anchored here). Undoable."""
+        if self.pts3d is None:
+            return
+        pidx = self._v2p(self.cur_frame)
+        valid = [j for j in range(self.pts3d.shape[1])
+                 if np.all(np.isfinite(self.pts3d[pidx, j]))]
+        if not valid:
+            self.statusBar().showMessage(tr('本帧没有有效关节可锚定。'))
+            return
+        pinned = self._kf_joints.get(pidx, set())
+        self._push_undo()
+        if set(valid) <= pinned:                       # all on -> toggle off
+            pinned.difference_update(valid)
+            if not pinned:
+                self._kf_joints.pop(pidx, None)
+                if pidx in self._keyframes:
+                    self._keyframes.remove(pidx)
+            msg = tr('已取消本帧全部关节锚定 (skel {})。').format(pidx)
+        else:
+            self._kf_joints.setdefault(pidx, set()).update(valid)
+            self.edited_joints.update(valid)
+            if pidx not in self._keyframes:
+                self._keyframes.append(pidx)
+                self._keyframes.sort()
+            msg = tr('已把本帧 {} 个关节按当前姿态锚定 (skel {})。').format(
+                len(valid), pidx)
+        self._refresh_kf_list()
+        self._refresh_edited_list()
+        self._show_frame()
+        self.statusBar().showMessage(msg)
+
+    def _copy_current_pose(self) -> None:
+        if self.pts3d is None:
+            return
+        pidx = self._v2p(self.cur_frame)
+        self._pose_clip = self.pts3d[pidx].copy()
+        self.statusBar().showMessage(
+            tr('已复制 skel {} 的整副姿态到剪贴板。').format(pidx))
+
+    def _paste_pose(self) -> None:
+        if self.pts3d is None:
+            return
+        if self._pose_clip is None:
+            self.statusBar().showMessage(tr('剪贴板为空 — 先「复制本帧姿态」。'))
+            return
+        if self._pose_clip.shape != self.pts3d.shape[1:]:
+            self.statusBar().showMessage(tr('剪贴板骨架关节数与当前动作不一致,无法粘贴。'))
+            return
+        pidx = self._v2p(self.cur_frame)
+        self._push_undo()
+        self.pts3d[pidx] = self._pose_clip.copy()
+        nj = self.pts3d.shape[1]
+        self._kf_joints.setdefault(pidx, set()).update(range(nj))
+        self.edited_joints.update(range(nj))
+        if pidx not in self._keyframes:
+            self._keyframes.append(pidx)
+            self._keyframes.sort()
+        self._refresh_kf_list()
+        self._refresh_edited_list()
+        self._show_frame()
+        self.statusBar().showMessage(
+            tr('已把剪贴板姿态粘到 skel {} 并锚定为关键帧。Ctrl+Z 撤销。').format(pidx))
+
+    def _copy_joints(self) -> None:
+        if self.pts3d is None:
+            return
+        joints = sorted(self.edited_joints)
+        if not joints:
+            self.statusBar().showMessage(
+                tr('选中集为空 — 先点击关节或「本帧全选关节」。'))
+            return
+        pidx = self._v2p(self.cur_frame)
+        self._joint_clip = {j: self.pts3d[pidx, j].copy() for j in joints}
+        self._joint_clip_nj = self.pts3d.shape[1]
+        self.statusBar().showMessage(
+            tr('已复制关节 {} 在 skel {} 的位置。').format(joints, pidx))
+
+    def _paste_joints(self) -> None:
+        if self.pts3d is None:
+            return
+        if not self._joint_clip:
+            self.statusBar().showMessage(tr('关节剪贴板为空 — 先「复制选中关节」。'))
+            return
+        if self._joint_clip_nj != self.pts3d.shape[1]:
+            self.statusBar().showMessage(tr('剪贴板骨架关节数与当前动作不一致,无法粘贴。'))
+            return
+        pidx = self._v2p(self.cur_frame)
+        self._push_undo()
+        for j, pos in self._joint_clip.items():
+            self.pts3d[pidx, j] = pos.copy()
+        js = set(self._joint_clip)
+        self._kf_joints.setdefault(pidx, set()).update(js)
+        self.edited_joints.update(js)
+        if pidx not in self._keyframes:
+            self._keyframes.append(pidx)
+            self._keyframes.sort()
+        self._refresh_kf_list()
+        self._refresh_edited_list()
+        self._show_frame()
+        self.statusBar().showMessage(
+            tr('已把关节 {} 粘到 skel {} 并锚定。Ctrl+Z 撤销。').format(
+                sorted(js), pidx))
+
+    def _commit_pass(self) -> None:
+        """Bake the current skeleton as the NEW editing baseline. Pins/marks
+        are merged into the cumulative provenance record FIRST (paper's
+        corrected-frame statistics survive), then cleared; offset-mode
+        interpolation and reset build on the committed pass afterwards.
+        Ctrl+Z reverses the whole commit."""
+        if self.pts3d is None or self._cur_action_idx < 0:
+            return
+        tag = self._actions[self._cur_action_idx]["tag"]
+        if (self.pts3d_orig is not None
+                and np.array_equal(np.nan_to_num(self.pts3d),
+                                   np.nan_to_num(self.pts3d_orig))
+                and not self._kf_joints):
+            self.statusBar().showMessage(tr('没有改动可提交。'))
+            return
+        # 1) provenance: merge current pins into the cumulative record so the
+        #    committed pass does not erase who-edited-what (G9 statistics).
+        prov = dict(self._progress.get(tag, {}).get("provenance", {}))
+        for f, js in self._kf_joints.items():
+            for j in js:
+                key = str(int(j))
+                frames = set(prov.get(key, []))
+                frames.add(int(f))
+                prov[key] = sorted(frames)
+        # 2) snapshot everything (incl. baseline) for a one-step full revert.
+        self._push_undo(with_baseline=True)
+        # 3) bake.
+        self._committed[tag] = self.pts3d.copy()
+        self.pts3d_orig = self.pts3d.copy()
+        self.pts3d_was_nan = None
+        self._keyframes.clear()
+        self._kf_joints.clear()
+        self.edited_joints.clear()
+        self._exported.discard(tag)
+        self._edited[tag] = {"pts": self.pts3d.copy(),
+                             "source": self._skel_source}
+        wrote = self._write_edit_pkl(tag)
+        self._capture_current_progress()
+        self._progress[tag] = {**self._progress.get(tag, {}),
+                               "baseline_committed": True,
+                               "provenance": prov}
+        self._write_progress_json()
+        self._refresh_kf_list()
+        self._refresh_edited_list()
+        self._show_frame()
+        self.statusBar().showMessage(
+            tr('已提交本轮为新起点{}: 关键帧/标记已并入历史记录并清空, 后续插值/还原以本轮为基线。Ctrl+Z 可整体回退。')
+            .format(tr(' (已写 _edited.pkl)') if wrote else ''))
+
+    # ---------------------------------------------- Feature 1: split new rep
+    def _reset_trim_spins(self) -> None:
+        lo, hi = self._play_lo, self._play_hi
+        for sp, v in ((self.trim_lo_spin, lo), (self.trim_hi_spin, hi)):
+            sp.blockSignals(True)
+            sp.setRange(lo, max(lo, hi))
+            sp.setValue(v)
+            sp.blockSignals(False)
+
+    @staticmethod
+    def _retag_filename(fn: str, old_tag: str, new_tag: str) -> str:
+        """Rename a per-action file for a new rep tag. Handles video/CSV names
+        (…-repN.ext) and mosh pkls (…-repN_stageii.pkl); appends the rep when
+        the old name carried none."""
+        m_new = re.search(r'-rep(\d+)$', new_tag)
+        new_rep = f"-rep{m_new.group(1)}" if m_new else ""
+        stem, ext = os.path.splitext(fn)
+        if re.search(r'-rep\d+(_stageii)?$', stem):
+            stem = re.sub(r'-rep\d+(?=(_stageii)?$)', new_rep, stem)
+        elif stem.endswith('_stageii'):
+            stem = stem[:-len('_stageii')] + new_rep + '_stageii'
+        else:
+            stem = stem + new_rep
+        return stem + ext
+
+    def _next_rep_tag(self, tag: str) -> str:
+        base = re.sub(r'-rep\d+$', '', tag)
+        n_max = 1
+        for a in self._actions:
+            m = re.match(re.escape(base) + r'-rep(\d+)$', a["tag"])
+            if m:
+                n_max = max(n_max, int(m.group(1)))
+        if self.folder and os.path.isdir(self.folder):
+            for fn in os.listdir(self.folder):
+                m = re.match(re.escape(base) + r'-rep(\d+)\.', fn)
+                if m:
+                    n_max = max(n_max, int(m.group(1)))
+        return f"{base}-rep{n_max + 1}"
+
+    @staticmethod
+    def _slice_csv(src: str, dst: str, p_lo: int, p_hi: int) -> bool:
+        """Copy rows [p_lo..p_hi] of the reference CSV, preserving the
+        'Export Frame Rate' header line and the column header."""
+        try:
+            with open(src, "r", encoding="utf-8", errors="replace") as f:
+                first = f.readline()
+                has_meta = "Export Frame Rate" in first
+            skip = 1 if has_meta else 0
+            df = pd.read_csv(src, skiprows=skip)
+            p_hi = min(p_hi, len(df) - 1)
+            if p_hi < p_lo:
+                return False
+            part = df.iloc[p_lo:p_hi + 1]
+            with open(dst, "w", encoding="utf-8", newline="") as f:
+                if has_meta:
+                    f.write(first if first.endswith("\n") else first + "\n")
+                part.to_csv(f, index=False)
+            return True
+        except Exception:
+            return False
+
+    def _extract_rep(self, vf_lo: int, vf_hi: int) -> str | None:
+        """Save video-frame range [vf_lo..vf_hi] of the current action as a
+        NEW action (rep): trimmed MP4 per camera (each with its own view
+        offset), a sliced reference CSV, and — for mosh sources — the current
+        (edited) skeleton slice as a new *_stageii.pkl. Original untouched.
+        Returns the new tag, or None."""
+        if self.pts3d is None or self._cur_action_idx < 0 or not self.folder:
+            return None
+        act = self._actions[self._cur_action_idx]
+        tag = act["tag"]
+        new_tag = self._next_rep_tag(tag)
+        p_lo, p_hi = self._v2p(vf_lo), self._v2p(vf_hi)
+        if p_hi <= p_lo or vf_hi <= vf_lo:
+            self.statusBar().showMessage(tr('拆分失败: 区间无效(终点须大于起点)。'))
+            return None
+        # CSV slice (required so the new action is discoverable).
+        if not act.get("csv"):
+            self.statusBar().showMessage(tr('拆分失败: 当前动作没有参考 CSV。'))
+            return None
+        new_csv = os.path.join(
+            self.folder, self._retag_filename(os.path.basename(act["csv"]),
+                                              tag, new_tag))
+        if not self._slice_csv(act["csv"], new_csv, p_lo, p_hi):
+            self.statusBar().showMessage(tr('拆分失败: CSV 切片写入失败。'))
+            return None
+        # Videos: one trimmed MP4 per camera, honoring per-view offsets.
+        vids: dict[str, str] = {}
+        srcs = {c: pth for c, pth in act["videos"].items()
+                if pth and os.path.exists(pth)}
+        prog = self._make_progress(tr('拆分新 rep'), tr('裁切视频...'),
+                                   max(1, len(srcs)))
+        try:
+            for i, (cam, pth) in enumerate(srcs.items()):
+                if prog.wasCanceled():
+                    break
+                prog.setLabelText(tr('裁切 {} ({}/{})').format(cam, i + 1,
+                                                              len(srcs)))
+                prog.setValue(i)
+                QApplication.processEvents()
+                off = self._view_offsets.get(cam, 0)
+                out = os.path.join(
+                    self.folder,
+                    self._retag_filename(os.path.basename(pth), tag, new_tag))
+                n = self._trim_video(pth, out, vf_lo + off, vf_hi + off,
+                                     self.vfps)
+                if n > 0:
+                    vids[cam] = out
+                elif os.path.exists(out):
+                    os.remove(out)
+        finally:
+            prog.close()
+        # Mosh source: current (edited) skeleton slice as a new stageii pkl,
+        # placed next to the original so it auto-attaches on reopen.
+        new_pkl = None
+        if act.get("pkl") and self._skel_source != "csv":
+            new_pkl = os.path.join(
+                os.path.dirname(act["pkl"]),
+                self._retag_filename(os.path.basename(act["pkl"]),
+                                     tag, new_tag))
+            try:
+                arr = np.ascontiguousarray(self.pts3d[p_lo:p_hi + 1],
+                                           dtype=np.float32)
+                with open(new_pkl, "wb") as f:
+                    pickle.dump(arr, f, protocol=2)
+            except Exception:
+                new_pkl = None
+        self._actions.append({"tag": new_tag, "csv": new_csv,
+                              "videos": vids, "pkl": new_pkl})
+        self._refill_action_list(keep_tag=tag)
+        self._cur_action_idx = next(
+            (i for i, a in enumerate(self._actions) if a["tag"] == tag),
+            self._cur_action_idx)
+        self.statusBar().showMessage(
+            tr('已另存新 rep: {} (视频 {} 路 + CSV{}), 原动作未改动。').format(
+                new_tag, len(vids),
+                tr(' + 骨架pkl') if new_pkl else ''))
+        return new_tag
+
+    def _on_extract_rep(self) -> None:
+        self._extract_rep(int(self.trim_lo_spin.value()),
+                          int(self.trim_hi_spin.value()))
+
     def _anchor_joint_here(self, joint: int) -> None:
         """TOGGLE one joint's anchor at the current frame (using its CURRENT
         pose; no value change). Click a joint to pin it here so interpolation
@@ -2486,7 +2881,7 @@ class SkeletonCorrector(QMainWindow):
             tr('已锚定关节 {} @ skel {}(当前姿态) —— 该关节共 {} 个关键帧,{}').format(joint, pidx, n, ready))
 
     # -------------------------------------------------------------- undo
-    def _push_undo(self) -> None:
+    def _push_undo(self, *, with_baseline: bool = False) -> None:
         if self.pts3d is None:
             return
         # Any edit un-finalizes the current action (its trimmed _edited.pkl is
@@ -2495,11 +2890,20 @@ class SkeletonCorrector(QMainWindow):
             self._exported.discard(self._actions[self._cur_action_idx]["tag"])
         # Snapshot the full editable state, not just poses, so undo also removes
         # the keyframe/pin an edit created (and restores ones a delete removed).
+        # A commit-pass additionally snapshots the baseline (5th element) so
+        # Ctrl+Z can reverse the whole commit.
+        base = None
+        if with_baseline and self._cur_action_idx >= 0:
+            tag = self._actions[self._cur_action_idx]["tag"]
+            base = (self.pts3d_orig.copy() if self.pts3d_orig is not None else None,
+                    None if self.pts3d_was_nan is None else self.pts3d_was_nan.copy(),
+                    tag, tag in self._committed)
         self.undo_stack.append((
             self.pts3d.copy(),
             list(self._keyframes),
             {f: set(js) for f, js in self._kf_joints.items()},
             set(self.edited_joints),
+            base,
         ))
         if len(self.undo_stack) > self.UNDO_MAX:
             self.undo_stack.pop(0)
@@ -2509,11 +2913,24 @@ class SkeletonCorrector(QMainWindow):
         if not self.undo_stack:
             self.statusBar().showMessage(tr('没有可撤销的步骤'))
             return
-        pts, kfs, kfj, edited = self.undo_stack.pop()
+        item = self.undo_stack.pop()
+        pts, kfs, kfj, edited = item[:4]
+        base = item[4] if len(item) > 4 else None
         self.pts3d = pts
         self._keyframes = list(kfs)
         self._kf_joints = {f: set(js) for f, js in kfj.items()}
         self.edited_joints = set(edited)
+        if base is not None:
+            orig, was_nan, tag, was_committed = base
+            if orig is not None:
+                self.pts3d_orig = orig
+            self.pts3d_was_nan = was_nan
+            if was_committed:
+                self._committed[tag] = (orig.copy() if orig is not None
+                                        else None)
+            else:
+                self._committed.pop(tag, None)
+            self._progress.setdefault(tag, {})["baseline_committed"] = was_committed
         self._refresh_kf_list()
         self._refresh_edited_list()
         self._update_undo_lbl()
@@ -2546,12 +2963,15 @@ class SkeletonCorrector(QMainWindow):
         if self._cur_action_idx >= 0:
             act = self._actions[self._cur_action_idx]
             self._edited.pop(act["tag"], None)
-            ep = self._edited_pkl_path(act, self._skel_source)
-            if ep and os.path.exists(ep):
-                try:
-                    os.remove(ep)
-                except Exception:
-                    pass
+            # Committed clips: the _edited.pkl IS the committed baseline the
+            # reset targets — keep it so reopening restores the same state.
+            if act["tag"] not in self._committed:
+                ep = self._edited_pkl_path(act, self._skel_source)
+                if ep and os.path.exists(ep):
+                    try:
+                        os.remove(ep)
+                    except Exception:
+                        pass
         self._refresh_edited_list()
         self._refresh_kf_list()
         self._show_frame()
