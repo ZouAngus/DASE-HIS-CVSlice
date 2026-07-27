@@ -132,7 +132,8 @@ def _swivel_dir(n: np.ndarray, root: np.ndarray,
 def solve_effector(root: np.ndarray, target: np.ndarray,
                    l1: float, l2: float,
                    hint_mid: np.ndarray | None,
-                   prev_mid: np.ndarray | None = None
+                   prev_mid: np.ndarray | None = None,
+                   swivel_pref: np.ndarray | None = None
                    ) -> tuple[np.ndarray, np.ndarray, bool] | None:
     """Two-bone IK: place mid + effector so the effector reaches ``target``.
 
@@ -163,6 +164,7 @@ def solve_effector(root: np.ndarray, target: np.ndarray,
         return mid, eff, clamped
 
     u = _swivel_dir(n, root, [hint_mid, prev_mid])
+    u = _hemisphere_clamp(u, n, swivel_pref)
     mid = root + a * n + r * u
     return mid, eff, clamped
 
@@ -192,7 +194,8 @@ def swivel_circle(root: np.ndarray, eff: np.ndarray,
 
 def solve_swivel(root: np.ndarray, eff: np.ndarray,
                  l1: float, l2: float,
-                 drag_pt: np.ndarray) -> np.ndarray | None:
+                 drag_pt: np.ndarray,
+                 swivel_pref: np.ndarray | None = None) -> np.ndarray | None:
     """Slide the mid joint onto the valid circle, nearest to ``drag_pt``.
 
     Root and effector stay fixed; bone lengths stay locked. Returns the new
@@ -208,7 +211,8 @@ def solve_swivel(root: np.ndarray, eff: np.ndarray,
     norm = float(np.linalg.norm(u))
     if norm < 1e-6:
         return None                  # drag point on the axis: direction unclear
-    return center + r * (u / norm)
+    u = _hemisphere_clamp(u / norm, n, swivel_pref)
+    return center + r * u
 
 
 def sample_circle(center: np.ndarray, radius: float, axis: np.ndarray,
@@ -297,3 +301,57 @@ def reference_pair_length(pts3d: np.ndarray, a: int, b: int,
         return None
     val = float(np.median(np.linalg.norm(pb[ok] - pa[ok], axis=1)))
     return val if val > _EPS else None
+
+
+# ------------------------------------------------- anatomical swivel limits
+# Only the KNEE has an unambiguous positional constraint: a bent knee always
+# protrudes toward the body's front hemisphere. Elbows are deliberately NOT
+# constrained (guard poses, akimbo etc. are legal); they rely on temporal
+# hint continuity instead.
+LEG_ROOT_JOINTS = (1, 2)             # SMPL left/right hip
+
+def pelvis_forward(pose: np.ndarray) -> np.ndarray | None:
+    """Unit forward direction of the body from one (J, 3) pose frame.
+
+    forward = normalize(cross(left_dir, up)) with left_dir = L_hip - R_hip
+    and up = spine3 - pelvis (SMPL-22/24 indices). None if degenerate.
+    """
+    if pose.shape[0] < 10:
+        return None
+    lh, rh, pel, sp3 = pose[1], pose[2], pose[0], pose[9]
+    if not (np.isfinite(lh).all() and np.isfinite(rh).all()
+            and np.isfinite(pel).all() and np.isfinite(sp3).all()):
+        return None
+    left = lh - rh
+    up = sp3 - pel
+    f = np.cross(left, up)
+    n = float(np.linalg.norm(f))
+    if n < 1e-9:
+        return None
+    return f / n
+
+
+def _hemisphere_clamp(u: np.ndarray, n: np.ndarray,
+                      pref: np.ndarray | None) -> np.ndarray:
+    """Clamp unit swivel direction ``u`` (⟂ n) into the hemisphere of ``pref``.
+
+    If ``u`` already points into the preferred half-space, it is returned
+    unchanged; otherwise it is projected onto the boundary great-circle (the
+    closest legal direction). No-op when pref is None or degenerate ⟂ n.
+    """
+    if pref is None:
+        return u
+    p = np.asarray(pref, float)
+    p = p - (p @ n) * n              # component ⟂ chain axis
+    norm = float(np.linalg.norm(p))
+    if norm < 1e-6:
+        return u
+    p /= norm
+    d = float(u @ p)
+    if d >= 0.0:
+        return u
+    w = u - d * p                    # drop the backward component
+    wn = float(np.linalg.norm(w))
+    if wn < 1e-6:
+        return p                     # u was exactly anti-preferred: snap to pref
+    return w / wn

@@ -197,3 +197,57 @@ def test_reference_pair_length_median_and_refusal():
     assert ik.reference_pair_length(pts, 12, 15) == pytest.approx(0.15)
     bad = np.full((10, 24, 3), np.nan)
     assert ik.reference_pair_length(bad, 12, 15) is None
+
+
+# ------------------------------------------------ anatomical swivel limits
+def _canonical_pose():
+    """Facing +Z: left hip +X, spine up +Y (SMPL indices 0/1/2/9)."""
+    pose = np.zeros((22, 3))
+    pose[1] = [+0.1, 0.9, 0.0]     # left hip
+    pose[2] = [-0.1, 0.9, 0.0]     # right hip
+    pose[0] = [0.0, 0.95, 0.0]     # pelvis
+    pose[9] = [0.0, 1.4, 0.0]      # spine3
+    return pose
+
+
+def test_pelvis_forward_canonical_and_degenerate():
+    f = ik.pelvis_forward(_canonical_pose())
+    assert f is not None
+    assert f == pytest.approx([0.0, 0.0, 1.0], abs=1e-9)
+    bad = _canonical_pose(); bad[9] = np.nan
+    assert ik.pelvis_forward(bad) is None
+
+
+def test_knee_pref_constrains_effector_solve():
+    # Vertical chain (hip above ankle); hint pushes the knee BACKWARD (-Z).
+    hip = np.array([0.0, 0.9, 0.0])
+    target = np.array([0.0, 0.45, 0.0])
+    back_hint = hip + np.array([0.0, -0.2, -0.5])
+    fwd = np.array([0.0, 0.0, 1.0])
+    mid, eff, _ = ik.solve_effector(hip, target, 0.35, 0.35, back_hint,
+                                    swivel_pref=fwd)
+    assert (mid - hip)[2] >= -1e-9          # knee not behind the body
+    # Without the preference the hint wins (knee goes backward).
+    mid2, _, _ = ik.solve_effector(hip, target, 0.35, 0.35, back_hint)
+    assert (mid2 - hip)[2] < 0
+
+
+def test_swivel_drag_clamped_to_forward_hemisphere():
+    hip = np.array([0.0, 0.9, 0.0])
+    ankle = np.array([0.0, 0.45, 0.0])
+    drag_back = np.array([0.0, 0.7, -5.0])
+    fwd = np.array([0.0, 0.0, 1.0])
+    mid = ik.solve_swivel(hip, ankle, 0.35, 0.35, drag_back, swivel_pref=fwd)
+    assert mid is not None and mid[2] >= -1e-9
+    # No preference: drag direction honoured.
+    mid2 = ik.solve_swivel(hip, ankle, 0.35, 0.35, drag_back)
+    assert mid2 is not None and mid2[2] < 0
+
+
+def test_hemisphere_clamp_projects_to_boundary_not_flip():
+    # u pointing 45° backward should land on the boundary great-circle
+    # (sideways), not flip to full-forward.
+    n = np.array([0.0, 1.0, 0.0])
+    u = np.array([1.0, 0.0, -1.0]) / np.sqrt(2)
+    out = ik._hemisphere_clamp(u, n, np.array([0.0, 0.0, 1.0]))
+    assert out == pytest.approx([1.0, 0.0, 0.0], abs=1e-9)

@@ -2295,8 +2295,12 @@ class SkeletonCorrector(QMainWindow):
             return set()
         l1, l2 = ref
         prev_mid = P[pidx - 1, chain.mid] if pidx > 0 else None
+        # Knees only: anatomical swivel limit (bend toward the body's front).
+        pref = (ik.pelvis_forward(P[pidx])
+                if chain.root in ik.LEG_ROOT_JOINTS else None)
         res = ik.solve_effector(root, target, l1, l2,
-                                P[pidx, chain.mid], prev_mid)
+                                P[pidx, chain.mid], prev_mid,
+                                swivel_pref=pref)
         if res is None:
             self.statusBar().showMessage(
                 tr('IK: 目标与{}根部重合,无法求解。').format(chain.name))
@@ -2335,7 +2339,9 @@ class SkeletonCorrector(QMainWindow):
                 tr('IK: {}骨长无法估计(本片段有效帧太少),请改用普通拖动。').format(chain.name))
             return set()
         l1, l2 = ref
-        new_mid = ik.solve_swivel(root, eff, l1, l2, target)
+        pref = (ik.pelvis_forward(P[pidx])
+                if chain.root in ik.LEG_ROOT_JOINTS else None)
+        new_mid = ik.solve_swivel(root, eff, l1, l2, target, swivel_pref=pref)
         if new_mid is None:
             d = float(np.linalg.norm(eff - root))
             if d >= l1 + l2 - 1e-9:
