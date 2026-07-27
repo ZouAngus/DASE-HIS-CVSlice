@@ -177,7 +177,6 @@ class SkeletonCorrector(QMainWindow):
         # U discards). Machine authors nothing without explicit acceptance.
         self._span_lo: int | None = None      # skel frame of '[' anchor
         self._span_hi: int | None = None      # skel frame of ']' anchor
-        self._span_prop: dict | None = None   # {'a','b','joints','seg'}
 
         # Per-scene QC report (tools/qc_scan.py output): tag -> score dict.
         # Purely advisory: drives list ordering + N-key suspect navigation.
@@ -527,11 +526,10 @@ class SkeletonCorrector(QMainWindow):
         # the in-between, human accepts — quality-neutral speedup.
         sp_g = QGroupBox(tr('🎯 区间插值提议 (选中关节)'))
         sp_g.setToolTip(
-            tr('修「肢体坏一段」的快捷流程:把播放头放在坏段前的好帧按 [ ,'
-               '放在坏段后的好帧按 ] ,按 P 生成提议(青色残影,只作用于当前'
-               '选中的关节),按 Y 接受 / U 放弃。提议 = 两端好帧的线性插值,'
-               '不用任何检测模型;接受前不改动任何数据。中途有极值时,先在'
-               '极值处修好并接受一段,再做下一段。'))
+            tr('修「肢体坏一段」: 播放头放在坏段前的好帧按 [ , 坏段后的好帧'
+               '按 ] , 按 P 直接线性填充选中关节(两端好帧连线, 不用任何'
+               '检测模型), 不满意 Ctrl+Z 一步撤销。U 清除区间标记。中途有'
+               '极值时在极值处分两段做。'))
         spl = QVBoxLayout(sp_g)
         sp_row1 = QHBoxLayout()
         self.span_lo_btn = QPushButton(tr('[ 起点=当前帧'))
@@ -545,15 +543,12 @@ class SkeletonCorrector(QMainWindow):
         self.span_lbl.setStyleSheet("color:#888;")
         spl.addWidget(self.span_lbl)
         sp_row2 = QHBoxLayout()
-        self.span_prop_btn = QPushButton(tr('✨ 生成提议 (P)'))
-        self.span_prop_btn.clicked.connect(self._span_propose)
-        sp_row2.addWidget(self.span_prop_btn)
-        self.span_ok_btn = QPushButton(tr('✔ 接受 (Y)'))
-        self.span_ok_btn.clicked.connect(self._span_accept)
-        sp_row2.addWidget(self.span_ok_btn)
-        self.span_no_btn = QPushButton(tr('✖ 放弃 (U)'))
-        self.span_no_btn.clicked.connect(self._span_discard)
-        sp_row2.addWidget(self.span_no_btn)
+        self.span_fill_btn = QPushButton(tr('⚡ 线性填充 (P)'))
+        self.span_fill_btn.clicked.connect(self._span_fill)
+        sp_row2.addWidget(self.span_fill_btn)
+        self.span_clear_btn = QPushButton(tr('清除区间 (U)'))
+        self.span_clear_btn.clicked.connect(self._span_clear)
+        sp_row2.addWidget(self.span_clear_btn)
         spl.addLayout(sp_row2)
         rp.addWidget(sp_g)
 
@@ -1842,27 +1837,6 @@ class SkeletonCorrector(QMainWindow):
                             if np.all(np.isfinite(cp)):
                                 cv2.polylines(frm, [cp.astype(np.int32)], True,
                                               (0, 255, 255), 1, cv2.LINE_AA)
-                # Span-proposal ghost: cyan markers at the proposed positions
-                # of the scoped joints, with a thin line from the current
-                # (bad) position. Pure preview — data changes only on Y.
-                if self._span_prop is not None:
-                    sp = self._span_prop
-                    if sp['a'] <= pidx <= sp['b']:
-                        gpose = pts.copy()
-                        gpose[sp['joints']] = sp['seg'][pidx - sp['a'],
-                                                        sp['joints']]
-                        gproj = project_pts(gpose, intr, extr,
-                                            False, False, False)
-                        if gproj is not None:
-                            for j in sp['joints']:
-                                gx, gy = gproj[j][:2]
-                                ox, oy = proj[j][:2]
-                                if np.isfinite([gx, gy, ox, oy]).all():
-                                    cv2.line(frm, (int(ox), int(oy)),
-                                             (int(gx), int(gy)),
-                                             (255, 220, 80), 1, cv2.LINE_AA)
-                                    cv2.circle(frm, (int(gx), int(gy)), 5,
-                                               (255, 220, 80), 2, cv2.LINE_AA)
                 if side == "T":
                     self._proj_L = proj
                 else:
@@ -2513,14 +2487,12 @@ class SkeletonCorrector(QMainWindow):
     def _span_update_lbl(self) -> None:
         lo = '?' if self._span_lo is None else str(self._span_lo)
         hi = '?' if self._span_hi is None else str(self._span_hi)
-        extra = tr('  |  提议待确认: Y 接受 / U 放弃') if self._span_prop else ''
-        self.span_lbl.setText(tr('区间: skel [{} .. {}]{}').format(lo, hi, extra))
+        self.span_lbl.setText(tr('区间: skel [{} .. {}]').format(lo, hi))
 
     def _span_set_lo(self) -> None:
         if self.pts3d is None:
             return
         self._span_lo = self._v2p(self.cur_frame)
-        self._span_prop = None
         self._span_update_lbl()
         self.statusBar().showMessage(
             tr('区间起点 = skel {} (请确保这是坏段前的好帧)').format(self._span_lo))
@@ -2529,13 +2501,14 @@ class SkeletonCorrector(QMainWindow):
         if self.pts3d is None:
             return
         self._span_hi = self._v2p(self.cur_frame)
-        self._span_prop = None
         self._span_update_lbl()
         self.statusBar().showMessage(
             tr('区间终点 = skel {} (请确保这是坏段后的好帧)').format(self._span_hi))
 
-    def _span_propose(self) -> None:
-        """Generate the linear in-between as a cyan ghost. Touches NO data."""
+    def _span_fill(self) -> None:
+        """Linear fill of the marked span for the SELECTED joints — applied
+        immediately (one undo step). The blend uses only the two human-chosen
+        anchor frames; no detector, no other frames."""
         if self.pts3d is None:
             return
         if self._span_lo is None or self._span_hi is None:
@@ -2545,54 +2518,35 @@ class SkeletonCorrector(QMainWindow):
         joints = sorted(self.edited_joints)
         if not joints:
             self.statusBar().showMessage(
-                tr('提议只作用于选中关节 —— 先点击关节(或「本帧全选关节」)构建选择集。'))
+                tr('填充只作用于选中关节 —— 先点击关节(或「本帧全选关节」)构建选择集。'))
             return
         seg = linear_span(self.pts3d, a, b, joints)
         if seg is None:
             self.statusBar().showMessage(
-                tr('无法生成提议: 区间无效(终点须大于起点)或端点关节含无效值。'))
-            return
-        self._span_prop = {'a': a, 'b': b, 'joints': joints, 'seg': seg}
-        self._span_update_lbl()
-        self._show_frame()
-        self.statusBar().showMessage(
-            tr('提议已生成(青色残影, 关节 {}): 翻看区间检查, Y 接受 / U 放弃。')
-            .format(joints))
-
-    def _span_accept(self) -> None:
-        p = self._span_prop
-        if p is None:
-            self.statusBar().showMessage(tr('没有待确认的提议 (先按 P 生成)。'))
+                tr('无法填充: 区间无效(终点须大于起点)或端点关节含无效值。'))
             return
         self._push_undo()
-        a, b, joints = p['a'], p['b'], p['joints']
-        self.pts3d[a:b + 1, joints] = p['seg'][:, joints]
-        # Anchor both boundary frames for the scoped joints (they are the
-        # human-approved ground truth the proposal was built on).
+        self.pts3d[a:b + 1, joints] = seg[:, joints]
         for f in (a, b):
             self._kf_joints.setdefault(f, set()).update(joints)
             if f not in self._keyframes:
                 self._keyframes.append(f)
         self._keyframes.sort()
         self.edited_joints.update(joints)
-        self._span_prop = None
-        self._span_update_lbl()
         self._refresh_kf_list()
         self._refresh_edited_list()
         self._show_frame()
         self.statusBar().showMessage(
-            tr('已接受提议: skel [{}..{}] 关节 {} 线性填充, 端点已锚定。Ctrl+Z 撤销。')
+            tr('已线性填充 skel [{}..{}] 关节 {}, 端点已锚定。不满意 Ctrl+Z 撤销。')
             .format(a, b, joints))
 
-    def _span_discard(self) -> None:
-        if self._span_prop is None and self._span_lo is None and self._span_hi is None:
+    def _span_clear(self) -> None:
+        if self._span_lo is None and self._span_hi is None:
             return
-        self._span_prop = None
         self._span_lo = None
         self._span_hi = None
         self._span_update_lbl()
-        self._show_frame()
-        self.statusBar().showMessage(tr('提议与区间已清除, 数据未改动。'))
+        self.statusBar().showMessage(tr('区间标记已清除。'))
 
     def _anchor_joint_here(self, joint: int) -> None:
         """TOGGLE one joint's anchor at the current frame (using its CURRENT
@@ -3754,7 +3708,7 @@ class SkeletonCorrector(QMainWindow):
         Qt.Key_Space, Qt.Key_W, Qt.Key_S, Qt.Key_Q, Qt.Key_E, Qt.Key_Z,
         Qt.Key_C, Qt.Key_A, Qt.Key_D, Qt.Key_Left, Qt.Key_Right, Qt.Key_K,
         Qt.Key_F, Qt.Key_G, Qt.Key_I, Qt.Key_N,
-        Qt.Key_BracketLeft, Qt.Key_BracketRight, Qt.Key_P, Qt.Key_Y, Qt.Key_U,
+        Qt.Key_BracketLeft, Qt.Key_BracketRight, Qt.Key_P, Qt.Key_U,
     })
     # Keys a focused spin box legitimately needs for EDITING its value;
     # everything else in _NAV_KEYS stays global even while a spin has focus.
@@ -3795,11 +3749,9 @@ class SkeletonCorrector(QMainWindow):
         elif k == Qt.Key_BracketRight:
             self._span_set_hi()                         # span end = here
         elif k == Qt.Key_P:
-            self._span_propose()                        # propose in-between
-        elif k == Qt.Key_Y:
-            self._span_accept()                         # accept proposal
+            self._span_fill()                           # linear fill (1 undo)
         elif k == Qt.Key_U:
-            self._span_discard()                        # discard proposal/span
+            self._span_clear()                          # clear span marks
         else:
             return False
         return True

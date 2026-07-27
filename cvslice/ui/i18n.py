@@ -652,6 +652,18 @@ EN: dict[str, str] = {
     "已接受提议: skel [{}..{}] 关节 {} 线性填充, 端点已锚定。Ctrl+Z 撤销。":
         "Proposal accepted: skel [{}..{}] joints {} filled linearly, anchors pinned. Ctrl+Z undoes.",
     "提议与区间已清除, 数据未改动。": "Proposal and span cleared; data untouched.",
+    "⚡ 线性填充 (P)": "⚡ Linear fill (P)",
+    "清除区间 (U)": "Clear span (U)",
+    "区间: skel [{} .. {}]": "Span: skel [{} .. {}]",
+    "修「肢体坏一段」: 播放头放在坏段前的好帧按 [ , 坏段后的好帧按 ] , 按 P 直接线性填充选中关节(两端好帧连线, 不用任何检测模型), 不满意 Ctrl+Z 一步撤销。U 清除区间标记。中途有极值时在极值处分两段做。":
+        "Fix a bad limb run: park on the good frame BEFORE it and press [ , on the good frame AFTER it and press ] , then P fills the selected joints linearly between the two anchors (no detector). One Ctrl+Z undoes it. U clears the marks. Split at extrema when the motion turns inside the span.",
+    "填充只作用于选中关节 —— 先点击关节(或「本帧全选关节」)构建选择集。":
+        "The fill applies to the SELECTED joints — click joints (or 'select all on this frame') first.",
+    "无法填充: 区间无效(终点须大于起点)或端点关节含无效值。":
+        "Cannot fill: invalid span (end must be after start) or non-finite anchor joints.",
+    "已线性填充 skel [{}..{}] 关节 {}, 端点已锚定。不满意 Ctrl+Z 撤销。":
+        "Filled skel [{}..{}] joints {} linearly; anchors pinned. Ctrl+Z undoes.",
+    "区间标记已清除。": "Span marks cleared.",
     "文件 ▸ 打开文件夹 加载导出目录 | 空格=播放 A/D=帧 W/S=动作 K=关键帧 I=IK N=可疑帧 [/]=区间 P=提议 (完整快捷键见 README)":
         "File ▸ Open folder to load an export | Space=play A/D=frame W/S=action K=keyframe I=IK N=suspect [/]=span P=propose (full shortcuts: README)",
 }
