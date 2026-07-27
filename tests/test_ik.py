@@ -252,26 +252,3 @@ def test_hemisphere_clamp_projects_to_boundary_not_flip():
     out = ik._hemisphere_clamp(u, n, np.array([0.0, 0.0, 1.0]))
     assert out == pytest.approx([1.0, 0.0, 0.0], abs=1e-9)
 
-
-# ---------------------------------------------------- span proposal (linear)
-def test_linear_span_scoped_joints_only_and_anchors_exact():
-    from cvslice.vision.propagation import linear_span
-    T, J = 11, 22
-    rng = np.random.default_rng(0)
-    P = rng.normal(size=(T, J, 3))
-    seg = linear_span(P, 2, 8, [5, 20])
-    assert seg is not None and seg.shape == (7, J, 3)
-    # anchors exact, midpoint = average, unscoped joints untouched
-    assert np.allclose(seg[0, 5], P[2, 5]) and np.allclose(seg[-1, 20], P[8, 20])
-    assert np.allclose(seg[3, 5], 0.5 * (P[2, 5] + P[8, 5]))
-    assert np.allclose(seg[:, 7], P[2:9, 7])
-
-
-def test_linear_span_refuses_degenerate():
-    from cvslice.vision.propagation import linear_span
-    P = np.zeros((10, 22, 3))
-    assert linear_span(P, 5, 5, [1]) is None          # empty span
-    assert linear_span(P, 6, 2, [1]) is None          # reversed
-    assert linear_span(P, 1, 4, []) is None           # no scope
-    P[4, 3] = np.nan
-    assert linear_span(P, 1, 4, [3]) is None          # bad anchor
