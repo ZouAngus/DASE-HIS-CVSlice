@@ -1180,7 +1180,7 @@ class SkeletonCorrector(QMainWindow):
                     self.statusBar().showMessage(
                         tr('已自动保存上一动作的编辑: {}').format(out_tag))
         act = self._actions[idx]
-        self._cur_action_idx = idx
+        prev_idx = self._cur_action_idx
 
         # Resolve which skeleton source to use. Default: prefer the SMPL/mosh
         # skeleton over CSV (CSV is reference). A per-action saved source wins.
@@ -1195,8 +1195,20 @@ class SkeletonCorrector(QMainWindow):
 
         pts3d, was_nan, fps, used = self._load_skeleton(act, self._skel_source)
         if pts3d is None:
+            # CRITICAL: do NOT adopt the new index on failure. Committing it
+            # before a successful load left a half-switched state (new tag,
+            # old skeleton) — every later auto-save then wrote the PREVIOUS
+            # action's pose into THIS action's _edited.pkl, permanently
+            # mis-attributing skeletons. Keep index and list row on the
+            # still-loaded action instead.
             self._warn(tr('错误'), tr('骨骼加载失败: {}').format(act['tag']))
+            if 0 <= prev_idx < len(self._actions):
+                self.action_list.blockSignals(True)
+                self.action_list.setCurrentRow(prev_idx)
+                self.action_list.blockSignals(False)
             return
+        # Load succeeded — only NOW is it safe to switch the current index.
+        self._cur_action_idx = idx
         self._skel_source = used
 
         # Release old caps, reset per-action caches, open new caps.
