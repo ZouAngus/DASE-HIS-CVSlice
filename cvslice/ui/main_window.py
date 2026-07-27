@@ -230,6 +230,15 @@ class ClipAnnotator(QMainWindow):
         self.slider.valueChanged.connect(self._on_slider)
         self.slider.setTracking(True)
         self.slider.installEventFilter(self)
+        # Global shortcut routing: without this, clicking the clip list steals
+        # letters into its type-ahead search ("keys switch clips"), and a
+        # focused offset spin box swallows everything until the video is
+        # clicked. The application-level filter keeps nav keys working
+        # regardless of focus; QTimer defers the spin hookup until the whole
+        # UI exists.
+        from PyQt5.QtWidgets import QApplication as _QApp
+        _QApp.instance().installEventFilter(self)
+        QTimer.singleShot(0, self._hook_spin_focus_release)
         cvl.addWidget(self.slider)
         br = QHBoxLayout()
         for txt, fn in [("<< -1s", lambda: self._jump(-1)), ("< Prev", self._prev),
@@ -2016,10 +2025,48 @@ class ClipAnnotator(QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(f"Checkpoint failed: {e}")
 
+    # Keys routed globally (see filter below). Tab is deliberately excluded
+    # (widget traversal); Z only acts with Ctrl inside the handler.
+    _NAV_KEYS = frozenset({
+        Qt.Key_Space, Qt.Key_A, Qt.Key_D, Qt.Key_Q, Qt.Key_E, Qt.Key_W,
+        Qt.Key_S, Qt.Key_Up, Qt.Key_Down, Qt.Key_Home, Qt.Key_End,
+        Qt.Key_K, Qt.Key_R, Qt.Key_Z,
+        Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5, Qt.Key_6, Qt.Key_7,
+    })
+    # Keys a focused spin box needs for editing its own value.
+    _SPIN_EDIT_KEYS = frozenset({
+        Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right,
+        Qt.Key_Home, Qt.Key_End,
+        Qt.Key_1, Qt.Key_2, Qt.Key_3, Qt.Key_4, Qt.Key_5, Qt.Key_6, Qt.Key_7,
+    })
+
+    def _hook_spin_focus_release(self):
+        """After committing a spin value (Enter/focus-out), hand focus back to
+        the window so shortcuts resume without clicking the video first."""
+        from PyQt5.QtWidgets import QAbstractSpinBox
+        for sp in self.findChildren(QAbstractSpinBox):
+            sp.editingFinished.connect(
+                lambda _self=self: _self.setFocus(Qt.OtherFocusReason))
+
     def eventFilter(self, obj, event):
-        """Show frame number tooltip when hovering over the slider."""
+        """Slider hover tooltip + application-wide nav-key routing."""
+        from PyQt5.QtCore import QEvent
+        if event.type() == QEvent.KeyPress and event.key() in self._NAV_KEYS:
+            from PyQt5.QtWidgets import (QApplication, QAbstractSpinBox,
+                                         QLineEdit)
+            # Only when THIS window is active (not the corrector, not dialogs).
+            if self.isActiveWindow():
+                fw = QApplication.focusWidget()
+                in_spin = (isinstance(fw, QAbstractSpinBox)
+                           or (isinstance(fw, QLineEdit)
+                               and isinstance(fw.parent(), QAbstractSpinBox)))
+                if isinstance(fw, QLineEdit) and not in_spin:
+                    pass                     # free-typing field: never hijack
+                elif in_spin and event.key() in self._SPIN_EDIT_KEYS:
+                    pass                     # editing keys stay with the spin
+                elif self._handle_nav_key(event):
+                    return True
         if obj is self.slider:
-            from PyQt5.QtCore import QEvent
             if event.type() in (QEvent.MouseMove, QEvent.HoverMove, QEvent.MouseButtonPress):
                 val = self.slider.value()
                 vf = self.vfps if self.vfps > 0 else 30.0
@@ -2626,6 +2673,12 @@ class ClipAnnotator(QMainWindow):
     #  Keyboard
     # =======================================================================
     def keyPressEvent(self, event):
+        if not self._handle_nav_key(event):
+            super().keyPressEvent(event)
+
+    def _handle_nav_key(self, event) -> bool:
+        """Run the nav/edit action for a key event. True if handled — shared
+        by keyPressEvent (window focus) and the app-level filter (any focus)."""
         k = event.key()
         mods = event.modifiers()
         if mods & Qt.ControlModifier and k == Qt.Key_Z:
@@ -2677,7 +2730,9 @@ class ClipAnnotator(QMainWindow):
         elif k == Qt.Key_R and not (mods & Qt.ControlModifier):
             self.vid_lbl.reset_view()
             self._show_frame()
-        else: super().keyPressEvent(event)
+        else:
+            return False
+        return True
 
     def _step_frames(self, n: int):
         """Step forward/backward by n frames."""

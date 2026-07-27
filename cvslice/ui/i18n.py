@@ -623,4 +623,35 @@ EN: dict[str, str] = {
     "平滑": "Smooth",
     "已对关节 {} 在 {}-帧高斯窗口上做平滑。":
         "Smoothed joints {} with a {}-frame Gaussian window.",
+
+    # ---- span proposal ([ / ] / P / Y / U) ----
+    "🎯 区间插值提议 (选中关节)": "🎯 Span proposal (selected joints)",
+    "修「肢体坏一段」的快捷流程:把播放头放在坏段前的好帧按 [ ,放在坏段后的好帧按 ] ,按 P 生成提议(青色残影,只作用于当前选中的关节),按 Y 接受 / U 放弃。提议 = 两端好帧的线性插值,不用任何检测模型;接受前不改动任何数据。中途有极值时,先在极值处修好并接受一段,再做下一段。":
+        "Fast path for a bad limb segment: park on the good frame BEFORE the bad run and press [ , on the good frame AFTER it and press ] , then P to preview a proposal (cyan ghost, selected joints only), Y to accept / U to discard. The proposal is a linear blend between the two good anchor frames — no detector involved, and nothing changes until you accept. If the motion has an extremum inside, fix and accept up to it first, then do the next span.",
+    "[ 起点=当前帧": "[ start = here",
+    "] 终点=当前帧": "] end = here",
+    "区间: 未设置": "Span: unset",
+    "✨ 生成提议 (P)": "✨ Propose (P)",
+    "✔ 接受 (Y)": "✔ Accept (Y)",
+    "✖ 放弃 (U)": "✖ Discard (U)",
+    "  |  提议待确认: Y 接受 / U 放弃": "  |  proposal pending: Y accept / U discard",
+    "区间: skel [{} .. {}]{}": "Span: skel [{} .. {}]{}",
+    "区间起点 = skel {} (请确保这是坏段前的好帧)":
+        "Span start = skel {} (make sure this is a GOOD frame before the bad run)",
+    "区间终点 = skel {} (请确保这是坏段后的好帧)":
+        "Span end = skel {} (make sure this is a GOOD frame after the bad run)",
+    "先用 [ 和 ] 在坏段两端的好帧上设定区间。":
+        "Set the span first: [ and ] on the good frames around the bad run.",
+    "提议只作用于选中关节 —— 先点击关节(或「本帧全选关节」)构建选择集。":
+        "Proposals apply to the SELECTED joints — click joints (or 'select all on this frame') first.",
+    "无法生成提议: 区间无效(终点须大于起点)或端点关节含无效值。":
+        "Cannot propose: invalid span (end must be after start) or non-finite anchor joints.",
+    "提议已生成(青色残影, 关节 {}): 翻看区间检查, Y 接受 / U 放弃。":
+        "Proposal ready (cyan ghost, joints {}): scrub the span to inspect, Y accept / U discard.",
+    "没有待确认的提议 (先按 P 生成)。": "No pending proposal (press P first).",
+    "已接受提议: skel [{}..{}] 关节 {} 线性填充, 端点已锚定。Ctrl+Z 撤销。":
+        "Proposal accepted: skel [{}..{}] joints {} filled linearly, anchors pinned. Ctrl+Z undoes.",
+    "提议与区间已清除, 数据未改动。": "Proposal and span cleared; data untouched.",
+    "文件 ▸ 打开文件夹 加载导出目录 | 空格=播放 A/D=帧 W/S=动作 K=关键帧 I=IK N=可疑帧 [/]=区间 P=提议 (完整快捷键见 README)":
+        "File ▸ Open folder to load an export | Space=play A/D=frame W/S=action K=keyframe I=IK N=suspect [/]=span P=propose (full shortcuts: README)",
 }

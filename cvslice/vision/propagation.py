@@ -933,3 +933,29 @@ def apply_bulk_offset_all_joints(pts3d: np.ndarray,
 
     # weights: (N,) -> (N, 1, 1), deltas: (J, 3) -> (1, J, 3)
     return original + deltas[None, :, :] * weights[:, None, None]
+
+
+def linear_span(pts3d: np.ndarray, a: int, b: int,
+                joints) -> np.ndarray | None:
+    """Span-proposal fill: linearly interpolate ``joints`` between the poses
+    at frames ``a`` and ``b`` (both treated as trusted anchors).
+
+    Returns a copy of ``pts3d[a..b]`` (inclusive) with only the scoped joints
+    replaced by the linear blend; every other joint is untouched. None when
+    the request is degenerate (b <= a, empty scope, or a non-finite anchor
+    for a scoped joint at either endpoint).
+
+    Used by the corrector's human-marked-span proposal: the human chooses the
+    good boundary frames, the machine authors the in-between, the human
+    accepts or rejects — nothing here consults detectors or models.
+    """
+    joints = sorted(set(int(j) for j in joints))
+    if b <= a or not joints:
+        return None
+    if not (np.all(np.isfinite(pts3d[a, joints]))
+            and np.all(np.isfinite(pts3d[b, joints]))):
+        return None
+    seg = pts3d[a:b + 1].copy()
+    w = (np.arange(b - a + 1, dtype=np.float64) / (b - a))[:, None, None]
+    seg[:, joints] = (1.0 - w) * pts3d[a, joints][None] + w * pts3d[b, joints][None]
+    return seg
