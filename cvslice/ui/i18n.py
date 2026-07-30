@@ -679,4 +679,14 @@ EN: dict[str, str] = {
 
     "文件 ▸ 打开文件夹 加载导出目录 | 空格=播放 A/D=帧 W/S=动作 K=关键帧 I=IK N=可疑帧 [/]=区间 P=提议 (完整快捷键见 README)":
         "File ▸ Open folder to load an export | Space=play A/D=frame W/S=action K=keyframe I=IK N=suspect [/]=span P=propose (full shortcuts: README)",
+
+    # --- offset restore / trim-align bug fixes (2026-07) ---
+    "非零 offset: {}": "Non-zero offsets: {}",
+    "↩ offset 全部归零": "↩ Zero ALL offsets",
+    '清零骨骼时间与所有相机的视角 offset——包括当前未选中相机上"看不见"的 offset(它们会让播放范围变短且不易发现)。':
+        "Reset the skeleton offset and EVERY camera's view offset to 0 — including 'invisible' offsets on cameras not currently selected in either view (those silently shrink the play range).",
+    "已把骨骼与所有相机的 offset 归零,播放范围已还原。":
+        "Skeleton + all camera offsets reset to 0; the play range is restored.",
+    "\n⚠ 以下视角实际写出帧数与窗口不符(可能源视频提前结束): {}":
+        "\n⚠ These views wrote fewer frames than the window (the source may have ended early): {}",
 }

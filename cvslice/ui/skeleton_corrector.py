@@ -643,6 +643,20 @@ class SkeletonCorrector(QMainWindow):
         self.vo_bot_spin.setValue(0)
         self.vo_bot_spin.valueChanged.connect(self._on_view_offset_changed)
         vof.addRow(tr('下视图:'), self.vo_bot_spin)
+        # Non-zero offsets on cameras NOT currently selected in either view are
+        # otherwise invisible — they clamp the play range and made "还原后长度
+        # 不恢复" look like data loss. Surface them + a one-click reset.
+        self.vo_status_lbl = QLabel("")
+        self.vo_status_lbl.setWordWrap(True)
+        self.vo_status_lbl.setStyleSheet("color:#c60; font-size:11px;")
+        self.vo_status_lbl.setVisible(False)
+        vof.addRow(self.vo_status_lbl)
+        vo_zero_btn = QPushButton(tr('↩ offset 全部归零'))
+        vo_zero_btn.setToolTip(
+            tr('清零骨骼时间与所有相机的视角 offset——包括当前未选中相机上'
+               '"看不见"的 offset(它们会让播放范围变短且不易发现)。'))
+        vo_zero_btn.clicked.connect(self._zero_all_offsets)
+        vof.addRow(vo_zero_btn)
         self.trim_head_spin = QSpinBox()
         self.trim_head_spin.setRange(0, self._off_bound)
         self.trim_head_spin.setValue(0)
@@ -1498,7 +1512,14 @@ class SkeletonCorrector(QMainWindow):
 
     @staticmethod
     def _trim_video(src: str, out: str, start: int, end: int, fps: float) -> int:
-        """Write frames [start..end] of *src* to *out* (mp4v). Returns # frames."""
+        """Write frames [start..end] of *src* to *out* (mp4v). Returns # frames.
+
+        The skip to *start* is done by sequential ``grab()`` from frame 0, NOT
+        by a ``CAP_PROP_POS_FRAMES`` seek: container seeks snap to the nearest
+        keyframe on several codec/backend combinations, silently shifting the
+        cut by a few frames — a classic source of "裁切对齐后仍然对不上".
+        Sequential decode is frame-exact (the bake is one-time, so the extra
+        decode cost is acceptable)."""
         cap = cv2.VideoCapture(src)
         if not cap.isOpened():
             return 0
@@ -1507,8 +1528,15 @@ class SkeletonCorrector(QMainWindow):
         tot = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         vw = cv2.VideoWriter(out, fourcc, fps if fps > 0 else 30.0, (w, h))
-        s, e = max(0, start), min(end, tot - 1)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, s)
+        s = max(0, start)
+        e = min(end, tot - 1) if tot > 0 else end
+        skipped = 0
+        while skipped < s:                 # frame-exact skip of [0..s)
+            if not cap.grab():
+                vw.release()
+                cap.release()
+                return 0
+            skipped += 1
         cur, n = s, 0
         while cur <= e:
             ret, frm = cap.read()
@@ -1574,6 +1602,8 @@ class SkeletonCorrector(QMainWindow):
         import shutil
         prog = self._make_progress(tr('裁切对齐'), tr('裁切视频...'), len(vids))
         done = []
+        shorts = []          # cams whose output has fewer frames than the window
+        expect = hi - lo + 1
         try:
             for i, (cam, path) in enumerate(vids.items()):
                 if prog.wasCanceled():
@@ -1588,13 +1618,20 @@ class SkeletonCorrector(QMainWindow):
                         shutil.copy2(path, bak)
                     except Exception:
                         pass
-                read_from = bak if os.path.exists(bak) else path
+                # ALWAYS cut from the CURRENT file: lo/hi/off are indices into
+                # the currently-open videos. On a re-bake the .bak holds the
+                # ORIGINAL (pre-first-bake) video whose frame indexing no
+                # longer matches — reading it shifted every re-baked view by
+                # the first bake's window start ("裁切了还是对不上").
+                # The .bak stays as a manual-restore backup only.
                 tmp = path + ".tmp.mp4"
-                n = self._trim_video(read_from, tmp, lo + off, hi + off, self.vfps)
+                n = self._trim_video(path, tmp, lo + off, hi + off, self.vfps)
                 if n > 0 and os.path.exists(tmp):
                     try:
                         os.replace(tmp, path)
                         done.append(cam)
+                        if n != expect:
+                            shorts.append(f"{cam}: {n}/{expect}")
                     except Exception:
                         if os.path.exists(tmp):
                             os.remove(tmp)
@@ -1657,9 +1694,11 @@ class SkeletonCorrector(QMainWindow):
         self._show_frame()
         if was_playing:
             self.play_btn.setChecked(True)
+        extra = (tr('\n⚠ 以下视角实际写出帧数与窗口不符(可能源视频提前结束): {}')
+                 .format(", ".join(shorts)) if shorts else "")
         QMessageBox.information(
             self, tr('裁切对齐完成'),
-            tr('pkl: {}→{} 帧 → {}\n视频: 覆盖 {}/{} 个视角 (源已 .bak 备份)\n窗口 视频[{}..{}];offset 已归零,pkl 与各视角逐帧对齐。\n重做: 用各 .bak 恢复并删除 {}。').format(n_full, trimmed.shape[0], os.path.basename(ep), len(done), len(vids), lo, hi, os.path.basename(ep)))
+            tr('pkl: {}→{} 帧 → {}\n视频: 覆盖 {}/{} 个视角 (源已 .bak 备份)\n窗口 视频[{}..{}];offset 已归零,pkl 与各视角逐帧对齐。\n重做: 用各 .bak 恢复并删除 {}。').format(n_full, trimmed.shape[0], os.path.basename(ep), len(done), len(vids), lo, hi, os.path.basename(ep)) + extra)
 
     def _save_all(self) -> None:
         """Save every edited action at once to its default output path.
@@ -3933,15 +3972,39 @@ class SkeletonCorrector(QMainWindow):
         self._show_frame()
 
     def _on_view_offset_changed(self, _val: int = 0) -> None:
-        """Update view offsets and recalculate effective vtotal."""
+        """Update view offsets and recalculate effective vtotal.
+
+        Only the spin that actually FIRED writes its camera's offset. Writing
+        both unconditionally broke the same-camera-in-both-views case: setting
+        the top spin was immediately overwritten by the bottom spin's stale
+        value, so the change silently did nothing."""
         top_cam = self.cam_top_combo.currentText()
         bot_cam = self.cam_bot_combo.currentText()
-        if top_cam:
+        snd = self.sender()
+        if top_cam and snd is not self.vo_bot_spin:
             self._view_offsets[top_cam] = self.vo_top_spin.value()
-        if bot_cam:
+        if bot_cam and snd is not self.vo_top_spin:
             self._view_offsets[bot_cam] = self.vo_bot_spin.value()
+        self._sync_vo_spins()   # reconcile both spins (same-camera case)
         self._recalc_play_range()
         self._show_frame()
+
+    def _zero_all_offsets(self) -> None:
+        """One-click restore of the full play range: zero the skeleton offset
+        AND every camera's view offset — including offsets on cameras that are
+        not currently shown in either view. Those invisible leftovers kept the
+        play window clamped after the user zeroed the visible spins ("offset
+        还原了但总长度没有还原" bug)."""
+        self._view_offsets.clear()
+        self._skel_offset = 0
+        self.skel_off_spin.blockSignals(True)
+        self.skel_off_spin.setValue(0)
+        self.skel_off_spin.blockSignals(False)
+        self._sync_vo_spins()
+        self._recalc_play_range()
+        self._show_frame()
+        self.statusBar().showMessage(
+            tr('已把骨骼与所有相机的 offset 归零,播放范围已还原。'))
 
     def _recalc_play_range(self) -> None:
         """Compute the playable video-frame window [lo, hi] and apply it.
@@ -3998,6 +4061,22 @@ class SkeletonCorrector(QMainWindow):
         self.vo_bot_spin.setValue(self._view_offsets.get(bot_cam, 0))
         self.vo_top_spin.blockSignals(False)
         self.vo_bot_spin.blockSignals(False)
+        self._refresh_vo_status()
+
+    def _refresh_vo_status(self) -> None:
+        """Show every camera whose offset is non-zero — the two spins only
+        cover the currently-selected cameras, so without this a leftover
+        offset on an unselected camera invisibly clamps the play range."""
+        lbl = getattr(self, "vo_status_lbl", None)
+        if lbl is None:
+            return
+        nz = {c: o for c, o in self._view_offsets.items() if int(o) != 0}
+        if nz:
+            lbl.setText(tr('非零 offset: {}').format(
+                ", ".join(f"{c}: {o:+d}" for c, o in sorted(nz.items()))))
+            lbl.setVisible(True)
+        else:
+            lbl.setVisible(False)
 
     # --------------------------------------------------------- playback
     def _on_slider(self, v: int) -> None:
