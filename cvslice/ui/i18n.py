@@ -689,4 +689,8 @@ EN: dict[str, str] = {
         "Skeleton + all camera offsets reset to 0; the play range is restored.",
     "\n⚠ 以下视角实际写出帧数与窗口不符(可能源视频提前结束): {}":
         "\n⚠ These views wrote fewer frames than the window (the source may have ended early): {}",
+
+    # --- edited-pkl provenance guard (2026-07) ---
+    "⚠ {} 的 _edited.pkl 疑似属于其他动作(串台残留),已忽略并使用原始骨架。确认后删除该文件即可消除本提示。":
+        "⚠ {}'s _edited.pkl appears to belong to a DIFFERENT action (mis-attribution leftover) — ignored; using the pristine source. Delete the file to clear this notice.",
 }

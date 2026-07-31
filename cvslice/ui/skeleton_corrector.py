@@ -1263,6 +1263,7 @@ class SkeletonCorrector(QMainWindow):
         ep = self._edited_pkl_path(act, used)
         baked = False
         stale_pkl = False
+        foreign_pkl = False
         saved_pre = self._progress.get(act["tag"], {})
         if ep and os.path.exists(ep):
             try:
@@ -1274,17 +1275,30 @@ class SkeletonCorrector(QMainWindow):
                         # stale from an older, longer source. Ignore it.
                         stale_pkl = True
                     else:
-                        self.pts3d = ep_pts.copy()
-                        if ep_pts.shape[0] != self.pts3d_orig.shape[0]:  # baked
-                            baked = True
-                            self.pts3d_orig = ep_pts.copy()
-                            self.pts3d_was_nan = None
-                        elif saved_pre.get("baseline_committed"):
-                            # Same length + committed pass on record: the pkl
-                            # is the committed baseline, not just an edit.
-                            self.pts3d_orig = ep_pts.copy()
-                            self.pts3d_was_nan = None
-                            self._committed[act["tag"]] = ep_pts.copy()
+                        # Verify the file really belongs to THIS action before
+                        # adopting it (mis-attributed leftovers used to be
+                        # adopted as "baked" and showed另一个动作的骨架).
+                        meta = self._read_edited_meta(ep)
+                        r0 = (float(fps) / float(vfps)
+                              if fps and vfps and fps > 0 and vfps > 0 else 0.0)
+                        ok, _why = self._edited_pkl_verdict(
+                            act["tag"], meta, int(ep_pts.shape[0]),
+                            int(self.pts3d_orig.shape[0]), int(min_vtotal), r0,
+                            bool(saved_pre.get("baked")))
+                        if not ok:
+                            foreign_pkl = True
+                        else:
+                            self.pts3d = ep_pts.copy()
+                            if ep_pts.shape[0] != self.pts3d_orig.shape[0]:  # baked
+                                baked = True
+                                self.pts3d_orig = ep_pts.copy()
+                                self.pts3d_was_nan = None
+                            elif saved_pre.get("baseline_committed"):
+                                # Same length + committed pass on record: the pkl
+                                # is the committed baseline, not just an edit.
+                                self.pts3d_orig = ep_pts.copy()
+                                self.pts3d_was_nan = None
+                                self._committed[act["tag"]] = ep_pts.copy()
             except Exception:
                 pass
         # An in-session edit (freshest) overrides the on-disk one.
@@ -1345,6 +1359,10 @@ class SkeletonCorrector(QMainWindow):
         if stale_pkl:
             self.statusBar().showMessage(
                 tr('提示: {} 的 _edited.pkl 比源更长(疑似旧数据),已忽略。')
+                .format(act["tag"]))
+        if foreign_pkl:
+            self.statusBar().showMessage(
+                tr('⚠ {} 的 _edited.pkl 疑似属于其他动作(串台残留),已忽略并使用原始骨架。确认后删除该文件即可消除本提示。')
                 .format(act["tag"]))
         try:
             self._trim_head = max(0, min(b, int(saved.get("trim_head", 0))))
@@ -1503,6 +1521,14 @@ class SkeletonCorrector(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, tr('保存失败'), str(e))
                 return
+            # Saved to the default _edited.pkl slot -> stamp provenance so the
+            # reopen verdict can trust (and tag-check) this file.
+            if src.output_ext == "pkl":
+                act_s = (self._actions[self._cur_action_idx]
+                         if self._cur_action_idx >= 0 else None)
+                ep_s = self._edited_pkl_path(act_s, self._skel_source) if act_s else None
+                if ep_s and os.path.abspath(target) == os.path.abspath(ep_s):
+                    self._write_edited_meta(ep_s, tag, self.pts3d)
             shape = tuple(np.asarray(self.pts3d).shape)
             QMessageBox.information(
                 self, tr('已保存'), tr('已写入: {}  shape={}').format(os.path.basename(target), shape))
@@ -1589,6 +1615,7 @@ class SkeletonCorrector(QMainWindow):
             with open(ep, "wb") as f:
                 pickle.dump(np.ascontiguousarray(trimmed, dtype=np.float32),
                             f, protocol=2)
+            self._write_edited_meta(ep, tag, trimmed)
         except Exception as e:
             QMessageBox.warning(self, tr('裁切对齐'), tr('写 pkl 失败: {}').format(e))
             return
@@ -1679,10 +1706,11 @@ class SkeletonCorrector(QMainWindow):
             sp.setValue(0)
             sp.blockSignals(False)
         # Frames are re-indexed now; the stored offsets/keyframes are stale.
+        # "baked": True lets the reopen verdict trust the shorter _edited.pkl.
         self._progress[tag] = {**self._progress.get(tag, {}), "skel_offset": 0,
                                "view_offsets": {}, "keyframes": [],
                                "edited_joints": [], "kf_joints": {},
-                               "trim_head": 0, "trim_tail": 0}
+                               "trim_head": 0, "trim_tail": 0, "baked": True}
         self._write_progress_json()
         self.timeline = Timeline(trimmed.shape[0], self.vtotal, self.vfps)
         self.cur_frame = 0
@@ -1780,6 +1808,58 @@ class SkeletonCorrector(QMainWindow):
         base = os.path.splitext(os.path.basename(pkl))[0]
         return os.path.join(os.path.dirname(pkl), f"{base}_edited.pkl")
 
+    @staticmethod
+    def _edited_meta_path(ep: str) -> str:
+        return ep + ".meta.json"
+
+    def _write_edited_meta(self, ep: str, tag, arr) -> None:
+        """Provenance sidecar: record WHICH action wrote this ``_edited.pkl``.
+        Verified on reopen, so a cross-written / hand-copied / stale edited
+        pkl can never silently replace another action's skeleton."""
+        try:
+            with open(self._edited_meta_path(ep), "w", encoding="utf-8") as f:
+                json.dump({"tag": str(tag), "n_frames": int(arr.shape[0]),
+                           "n_joints": int(arr.shape[1])}, f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _read_edited_meta(ep: str) -> dict | None:
+        try:
+            with open(ep + ".meta.json", encoding="utf-8") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _edited_pkl_verdict(tag, meta, n_edit: int, n_src: int,
+                            vtotal: int, r0: float,
+                            baked_flag: bool) -> tuple[bool, str]:
+        """Decide whether an on-disk ``_edited.pkl`` really belongs to *tag*.
+
+        The old mis-attribution bug (and hand-copied files) leave an edited
+        pkl whose content/length belongs to a DIFFERENT action; adopting it
+        showed另一个动作的骨架 after restart. Checks, in order:
+        - sidecar meta present with a different tag -> reject;
+        - same length as the source -> a normal in-place edit, accept;
+        - shorter (claims to be a 裁切对齐 bake): accept if the sidecar or
+          the progress ``baked`` flag vouches for it, or if the length
+          actually matches the (trimmed) videos via the FPS ratio *r0*;
+          otherwise the length matches nothing of this action -> reject.
+        Returns (accept, reason)."""
+        if meta is not None and str(meta.get("tag") or "") not in ("", str(tag)):
+            return False, "meta-tag-mismatch"
+        if n_edit == n_src:
+            return True, "in-place-edit"
+        if meta is not None or baked_flag:
+            return True, "baked-verified"
+        if r0 > 0 and vtotal > 0:
+            if abs(n_edit - vtotal * r0) <= max(3.0, 0.02 * n_edit):
+                return True, "baked-matches-videos"
+            return False, "length-matches-nothing"
+        return True, "legacy-unverifiable"
+
     def _write_edit_pkl(self, tag) -> bool:
         """Write ONE cached edited action to its ``<base>_edited.pkl`` (same file
         the manual 保存 produces). Returns True if written."""
@@ -1796,6 +1876,7 @@ class SkeletonCorrector(QMainWindow):
             arr = np.ascontiguousarray(info["pts"], dtype=np.float32)
             with open(ep, "wb") as f:
                 pickle.dump(arr, f, protocol=2)
+            self._write_edited_meta(ep, tag, arr)
             return True
         except Exception:
             return False
