@@ -12,7 +12,7 @@ if /i not "%GO%"=="Y" goto :eof
 
 if not exist "E:\mosh-results\13" mkdir "E:\mosh-results\13"
 echo === Step 2: downloading anything matching *13* ... ===
-scp -P 23 -r "angus@147.8.93.66:/home/angus/2026_moshpp_for_latest_data/*13*" "E:\mosh-results\13\"
+scp -P 23 -r "angus@147.8.93.66:/home/angus/2026_moshpp_for_latest_data/soma_2026_workspace/runtime_mosh/mosh_results/data/13-*" "E:\mosh-results\13\"
 
 echo.
 echo === Done. Local result: ===
