@@ -76,9 +76,16 @@ A → B 的路径就是人工修正；B 之后无人工环节。
 | `11_old` / `12_old` / `CVCalibration2026` / `05-star-002` | 清理脚本会移入 `E:\_review_before_delete\`，你过目后删（11/12 旧版删前先并补丁）|
 | `LOST.DIR`（空）、`2025`（去年数据集）、NTU zip（6.7GB）| 不动；NTU zip 可挪走腾空间 |
 
+## 存储布局决议（2026-08）
+
+- **C 盘（固定存储）= 处理过的数据**：A/B 类三件套统一住 `cvslice\data\`（`{人}\exported_{人}` + `smpl\{人}`），用 `tools\consolidate_to_c.py` 从 E 盘汇入（E 只读、先干跑算量、同名不同内容只报不动）。
+- **E 盘（流动盘）= 最原始数据**：`Data_2026` 经比对已是 `C:\cv_data_2026` 的完整超集（97/99 CSV 逐字节一致；新版 Boss_07/Travel_07 在 E 根目录待归位；视频 1407 个全同）→ 归位后 `C:\cv_data_2026` 可删。
+- **已清出**：`cvslice\data` 里的 `1.15_13`、`1.16_15`、`raw_csv`、`15_export_37.zip`（共 101 GB 原始数据）已移入 `_to_delete\raw_data_cleared\`。
+- **待人工确认的同名不同内容**：① E `csv_data` 的 Boss_07/Travel_07（1 月旧版）用根目录 6 月新版顶替、旧版留底改名；② `1.7_03` 的 gallery topcenter/topleft/topright 三个视频 C/E 两侧标签互换，03 处理前须人工判定哪侧视角标注正确。
+
 ## 下一步顺序
 
-1. 删 `cvslice\_to_delete`；跑 E 盘清理脚本；`git push`（积压 13 个提交）。
+1. 删 `cvslice\_to_delete`（含 101GB 原始+8686 垃圾）；跑 E 盘清理脚本；`python tools\consolidate_to_c.py` 干跑确认后 `--run`（约 187GB，E→C）；`git push`。
 2. B 类落地：`build_dataset_v1.py --actor 15 --run` 出第一份正式数据集。
 3. A 类开修：优先 07（最干净）或 13（刚对齐）；11/12 先并补丁。
 4. 补料：08 补切片、14 补 MoSh、10 查视频下落、13-elsdon 重导、03/09 全流程。
