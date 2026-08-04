@@ -21,14 +21,36 @@
 | 10 | 297 | — | **173** | **✗ 全盘无切片** | ✗ | 异常 | 有人修正过 173 个动作但**找不到对应切片视频**——修正在哪个视频上做的？待查 |
 | 11 | 266 | 266 | 0 | 3892 mp4 / 278 csv | ✅ | **a** | `11_old` 旧版待删；`11_changed_csv`（91 个修正 CSV 补丁）**须先并入正式目录** |
 | 12 | 302 | 302 | 0 | 4228 mp4 / 302 csv | ✅ | **a** | `12_old` 旧版待删；`12_changed_csv`（84 个补丁）同上 |
-| 13 | 290（已从服务器取回 → `data/smpl/13`） | 待 align 生成 | 0 | ✅ 但有缺口（见问题2） | ✅ | 待 align → a | mosh 已就位；跑 `tools/align_13.bat` 对齐后即 a 类。**13-elsdon 切片残缺**（39 CSV 仅 15 段视频）、13-boss 缺 6 段 |
+| 13 | 290（`data/smpl/13`） | ✅ 254 clips 已对齐（`13_aligned`） | 0 | ✅ 但 elsdon 残缺（见问题2） | ✅ | **a** | 2026-08 对齐完成：254/290 clips（elsdon 仅 3 个有视频）。15 个视角残差超标待修正时留意（清单见问题2下表） |
 | 14 | ✗ | — | — | 4130 mp4 / 295 csv | ✅ | 缺 mosh | 切片全套齐，**SMPL 未跑**（mosh-results 无 14） |
 | 15 | 283 | 283 | **246/282 (87%)** | ✅ (仓库 `data/15/15_export_37`) | ✅ | **b** | 唯一接近完成：跑 `build_dataset_v1.py --actor 15 --run` 即进最终格式；余 36 动作未修正为 silver |
 
 ## 2. 具体问题清单（按严重度）
 
 1. **10 号谜团**：mosh 结果里有 173 个 `_edited.pkl`（说明修正工作做过），但全盘没有 10 号的切片视频/CSV/标定。要么切片在未连接的盘上，要么修正是在原始视频上做的。**处理前先搞清来源，否则这 173 个修正无法进数据集**。
-2. **13 号（更新 2026-08）**：mosh 已从实验室服务器取回（290 个 stageii，六场景齐），放在 `data/smpl/13`。尚未做对齐——用 `tools/align_13.bat` 一键跑（产出 `data/smpl/13_aligned` + `data/13/13_export_aligned`）。**新发现的缺口**：缺视频精确清单：`13-boss` 仅 `shooting-rep1` 缺 6 视角（只有 topleft）；`13-elsdon` 39 个动作中 37 个完全没视频，仅 `walking_clockwise-rep1` 和 `walking_anti_clockwise-rep1` 齐全（`running_clockwise-rep1` 只有 topleft）——elsdon 场景需整体重新导出。
+2. **13 号（2026-08 已完成对齐）**：mosh 从服务器取回（290 stageii）→ `tools/align_13.bat` 对齐完成，254 clips 进入 `data/smpl/13_aligned` + `data/13/13_export_aligned`（含逐场景 alignment_report.json 自验证）。
+   - **缺视频**：`13-boss` 仅 `shooting-rep1` 缺 6 视角（只有 topleft）；`13-elsdon` 39 个动作中 37 个完全没视频，仅 walking_clockwise/anti_clockwise-rep1 齐全——**elsdon 场景需整体重新导出**。
+   - **对齐残差超标视角（15 个，修正时优先核查，可用修正器的视角 offset 微调）**：
+
+   | 动作 | 视角 | 残差(帧) | 置信度 |
+   |------|------|---------|--------|
+   | 13-boss-bending_down_right-rep1 | bottomright | -4 | 0.98 |
+   | 13-gallery-pick_up_head__put_back-rep5 | topleft | -3 | 0.94 |
+   | 13-travel-grab_and_collect__box-rep1 | diagonal | -3 | 0.98 |
+   | 13-travel-grab_and_collect__box-rep3 | bottomleft | -2 | 0.83 |
+   | 13-travel-grab_and_collect__box-rep5 | topleft | +13 | 0.55 |
+   | 13-travel-measure_length-rep1 | bottomcenter | -2 | 0.99 |
+   | 13-travel-measure_length-rep2 | bottomcenter | +6 | 0.56 |
+   | 13-travel-measure_length-rep2 | topcenter | +2 | 0.84 |
+   | 13-travel-raising_hand_center-rep1 | bottomleft | -4 | 0.94 |
+   | 13-travel-raising_hand_left-rep1 | topleft | +2 | 0.96 |
+   | 13-travel-raising_hand_left-rep2 | bottomright | +2 | 0.86 |
+   | 13-travel-raising_hand_left-rep3 | diagonal | -4 | 0.98 |
+   | 13-travel-raising_hand_right-rep3 | diagonal | -9 | 0.68 |
+   | 13-travel-raising_hand_right-rep4 | bottomright | +5 | 1.00 |
+   | 13-trove-raising_hand_left-rep4 | bottomleft | -2 | 0.95 |
+
+   （travel 场景占 12/15，多为长片段的片内漂移，属 align 已知局限。）
 3. **08 号缺 5 个场景切片**：mosh 全套在，但只有 boss 场景切了片（且 boss 已修 18 个动作）。elsdon/gallery/star/travel/trove 需要补切片。
 4. **14 号缺 SMPL**：切片全套齐，直接补跑 MoSh 即可升级为 a 类。
 5. **11/12 的补丁未合并**：`11_changed_csv`（91 个）/`12_changed_csv`（84 个）是修正后的参考 CSV（raising_hand 全场景、boss waive_*、travel walking_clockwise、trove dodge_car 等），**必须先覆盖进 11/12 正式目录**，之后 `11_old`/`12_old` 才能删。
