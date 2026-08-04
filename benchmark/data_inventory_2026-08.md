@@ -28,7 +28,7 @@
 ## 2. 具体问题清单（按严重度）
 
 1. **10 号谜团**：mosh 结果里有 173 个 `_edited.pkl`（说明修正工作做过），但全盘没有 10 号的切片视频/CSV/标定。要么切片在未连接的盘上，要么修正是在原始视频上做的。**处理前先搞清来源，否则这 173 个修正无法进数据集**。
-2. **13 号（更新 2026-08）**：mosh 已从实验室服务器取回（290 个 stageii，六场景齐），放在 `data/smpl/13`。尚未做对齐——用 `tools/align_13.bat` 一键跑（产出 `data/smpl/13_aligned` + `data/13/13_export_aligned`）。**新发现的缺口**：`13-elsdon` 切片导出中途断掉，39 个 CSV 只有 15 段视频（约 2 个动作），需重新导出该场景；`13-boss` 少 6 段视频（1 个动作缺 6 视角）。
+2. **13 号（更新 2026-08）**：mosh 已从实验室服务器取回（290 个 stageii，六场景齐），放在 `data/smpl/13`。尚未做对齐——用 `tools/align_13.bat` 一键跑（产出 `data/smpl/13_aligned` + `data/13/13_export_aligned`）。**新发现的缺口**：缺视频精确清单：`13-boss` 仅 `shooting-rep1` 缺 6 视角（只有 topleft）；`13-elsdon` 39 个动作中 37 个完全没视频，仅 `walking_clockwise-rep1` 和 `walking_anti_clockwise-rep1` 齐全（`running_clockwise-rep1` 只有 topleft）——elsdon 场景需整体重新导出。
 3. **08 号缺 5 个场景切片**：mosh 全套在，但只有 boss 场景切了片（且 boss 已修 18 个动作）。elsdon/gallery/star/travel/trove 需要补切片。
 4. **14 号缺 SMPL**：切片全套齐，直接补跑 MoSh 即可升级为 a 类。
 5. **11/12 的补丁未合并**：`11_changed_csv`（91 个）/`12_changed_csv`（84 个）是修正后的参考 CSV（raising_hand 全场景、boss waive_*、travel walking_clockwise、trove dodge_car 等），**必须先覆盖进 11/12 正式目录**，之后 `11_old`/`12_old` 才能删。
