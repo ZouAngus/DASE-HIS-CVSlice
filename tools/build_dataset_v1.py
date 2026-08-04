@@ -22,11 +22,13 @@ split_v0.json, 规划文档 P2.2/2.3):
   └── videos/{actor}-{scene}/{...}.mp4         7 views/action, copied as-is
       └── lists/mmaction_all.txt               "relpath label_id" per view-sample
 
-Decisions encoded (2026-08, Angus): skeletons are RESAMPLED to the video rate
-(skeleton frame i corresponds to video frame i, ~30 fps; native-rate data stays
-in the source tree); per-view videos are trimmed by their corrector offsets at
-export (all views + skeleton frame-locked; sources untouched); corrected ==
-*_edited.pkl present (else the pristine source is used, sample marked silver).
+Decisions encoded (2026-08, Angus, final): skeletons keep the NATIVE mocap
+rate — the npz stores the native-rate slice covering the aligned window plus
+(fps, video_fps, ratio) so dataloaders map video frame i -> skeleton frame
+round(i * ratio); per-view videos are trimmed by their corrector offsets at
+export (frame-locked to the window; sources untouched); videos are COPIED
+(self-contained dir); corrected == *_edited.pkl present (else pristine source,
+sample marked silver). Output root: <repo>/data/release/CAVEAT_v0.
 
 Alignment per action (mirrors the corrector's play-window logic): the video
 window [lo, hi] is the intersection over views of the offset-valid range, and
@@ -250,11 +252,13 @@ def align_window(n_skel, so, ratio, view_tots, view_offs):
     return lo, hi
 
 
-def resample_skel(pts, so, ratio, lo, hi):
-    """One skeleton frame per video frame i in [lo..hi]: round((i+so)*ratio)."""
-    idx = np.round((np.arange(lo, hi + 1) + so) * ratio).astype(int)
-    idx = np.clip(idx, 0, pts.shape[0] - 1)
-    return pts[idx]
+def skel_window(pts, so, ratio, lo, hi):
+    """Native-rate skeleton slice covering video window [lo..hi] (+ start idx).
+    Video frame i maps to sliced index round((i+so)*ratio) - slo."""
+    n = pts.shape[0]
+    slo = min(n - 1, max(0, int(round((lo + so) * ratio))))
+    shi = min(n - 1, max(slo, int(round((hi + so) * ratio))))
+    return pts[slo:shi + 1], slo
 
 
 def build(repo, actor, out, run, check_videos):
@@ -306,6 +310,7 @@ def build(repo, actor, out, run, check_videos):
             "sample_id": tag, "actor": actor, "scene": s["scene"],
             "action": s["action"], "label_id": label_map[s["action"]],
             "rep": s["rep"], "n_frames": -1, "fps": 0.0,
+            "n_frames_skel": -1,
             "n_frames_skel_native": n_skel, "fps_skel_native": fps,
             "n_frames_video": n_vid, "n_views": len(s["views"]),
             "views": ";".join(sorted(s["views"])),
@@ -366,14 +371,16 @@ def build(repo, actor, out, run, check_videos):
             continue
         t_out = hi - lo + 1
 
-        # skeleton: one frame per video frame in [lo..hi], SMPL-22, 30fps-locked
-        sk22 = resample_skel(pts[:, :N_JOINTS], so, ratio, lo, hi)
+        # skeleton: NATIVE-rate slice covering the aligned window, SMPL-22.
+        # Dataloaders map video frame i -> skeleton index round(i*ratio).
+        sk22, slo = skel_window(pts[:, :N_JOINTS], so, ratio, lo, hi)
         sk_dir = os.path.join(out, "skeletons", adir)
         os.makedirs(sk_dir, exist_ok=True)
         np.savez_compressed(
             os.path.join(sk_dir, tag + ".npz"),
             pts=np.ascontiguousarray(sk22, dtype=np.float32),
-            fps=np.float32(vfps), src_fps=np.float32(src_fps),
+            fps=np.float32(src_fps), video_fps=np.float32(vfps),
+            ratio=np.float64(ratio), n_frames_video=np.int64(t_out),
             corrected=bool(s["corrected"]),
             actor=actor, scene=s["scene"], action=s["action"], rep=s["rep"])
         n_skel_w += 1
@@ -397,6 +404,7 @@ def build(repo, actor, out, run, check_videos):
             list_rows.append("videos/{}/{} {}".format(
                 adir, os.path.basename(vp), label_map[s["action"]]))
         row.update({"n_frames": t_out, "fps": round(vfps, 3),
+                    "n_frames_skel": int(sk22.shape[0]),
                     "views_recut": ";".join(recut)})
         cal_src = os.path.join(s["scene_dir"], "calibration")
         cal_dst = os.path.join(md, "calibration", adir)
@@ -415,9 +423,10 @@ def build(repo, actor, out, run, check_videos):
     with open(os.path.join(out, "README.md"), "w", encoding="utf-8") as f:
         f.write("# CAVEAT dataset (build v1, work-in-progress)\n\n"
                 "- Joint set: SMPL-22 (benchmark/joints.md v1); world coords, metres.\n"
-                "- skeletons/: one .npz per action — pts float32 (T,22,3) RESAMPLED"
-                " to the video rate: skeleton frame i == video frame i (fps field;"
-                " src_fps = native mocap rate).\n"
+                "- skeletons/: one .npz per action — pts float32 (T,22,3) at the"
+                " NATIVE mocap rate (fps), sliced to the aligned window; map video"
+                " frame i -> skeleton index round(i * ratio) (ratio + video_fps +"
+                " n_frames_video stored in the npz).\n"
                 "- videos/: per-view mp4 clips, offset-aligned at export (view label"
                 " in filename); head-aligned copies may keep surplus TAIL frames"
                 " beyond samples.csv n_frames — ignore them.\n"
@@ -437,13 +446,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--actor", default="15")
     ap.add_argument("--repo", default=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    ap.add_argument("--out", default=None, help="output root (default: <repo>/data/CAVEAT_v1)")
+    ap.add_argument("--out", default=None,
+                    help="output root (default: <repo>/data/release/CAVEAT_v0)")
     ap.add_argument("--run", action="store_true", help="actually write (default dry-run)")
     ap.add_argument("--dry-run", action="store_true", help="explicit dry-run (default)")
     ap.add_argument("--check-videos", action="store_true",
                     help="open each first-view video to count frames (needs cv2, slow)")
     a = ap.parse_args()
-    out = a.out or os.path.join(a.repo, "data", "CAVEAT_v1")
+    out = a.out or os.path.join(a.repo, "data", "release", "CAVEAT_v0")
     build(a.repo, a.actor, out, run=a.run and not a.dry_run,
           check_videos=a.check_videos)
 
