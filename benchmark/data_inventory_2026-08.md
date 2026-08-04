@@ -10,7 +10,7 @@
 | 演员 | mosh (stageii) | 30hz 版 | 已修正 (_edited) | 切片视频+CSV | 标定 | 分类 | 备注 |
 |------|---------------|---------|-----------------|--------------|------|------|------|
 | 01 | 302 | — | 0 | 4228 mp4 / 302 csv | ✅ | **a** | mosh 目录命名与他人不同（Boss_01_24points 式） |
-| 02 | 232 | — | 0 | 3150 mp4 / 225 csv | ✅ | **a** | 无 elsdon，是 **sword** 场景；有 02_002-trove 补拍（dodge_car ×5） |
+| 02 | 232 | — | 0 | 3150 mp4 / 225 csv | ✅ | **a** | sword 场景 = elsdon（命名别名，已在构建脚本归一化）；有 02_002-trove 补拍（dodge_car ×5） |
 | 03 | ✗ | — | — | ✗ | — | 原料 | 仅 Data_2026 原始视频+动捕 CSV，SMPL/切片均未做 |
 | 04 | 178 | 178 | 0 | 2416 mp4 / 178 csv | ✅ | **a** | 无 elsdon 场景；`04_data\` 是本人整合包（与 mosh-results\04、sliced 04 重复） |
 | 05 | 302 | — | 0 | 4088 mp4 / 292 csv | ✅ | **a** | 补拍碎片化严重（_002.._004 目录）；**05-star-002 是 0 字节废导出**（已列入清理） |
@@ -33,7 +33,7 @@
 4. **14 号缺 SMPL**：切片全套齐，直接补跑 MoSh 即可升级为 a 类。
 5. **11/12 的补丁未合并**：`11_changed_csv`（91 个）/`12_changed_csv`（84 个）是修正后的参考 CSV（raising_hand 全场景、boss waive_*、travel walking_clockwise、trove dodge_car 等），**必须先覆盖进 11/12 正式目录**，之后 `11_old`/`12_old` 才能删。
 6. **05 号目录碎片化**：elsdon/star/travel 的补拍分散在 `-002..-004` 子目录，归拢时需按 rep 顺序合并；`05-star-002` 整个是 0 字节废文件（清理脚本会移走）。
-7. **02/06 的 sword 场景**：与其他人的 elsdon 不对应，X-Scene 协议里怎么归类需要组里定。
+7. **02/06 的 sword 场景**：~~待定~~ 已确认 **sword = elsdon**（同一场景、命名不同）。`build_dataset_v1.py` 已加 SCENE_ALIAS 归一化：sword 与 elsdon 共用同一场景编号，X-Scene 协议按同一场景处理；文件名保持原拼写。
 8. **15 号收尾**：36 个动作无修正版（进数据集标 silver）；13 个动作有未归零 offset（build 脚本导出时会自动按 offset 裁齐）；`15-boss-cut_use_laser_to_reflect-rep3` 只有 1 个视角。
 9. **1.13_09_missing**：Data_2026 原始视频目录标记 09 号 1 月 13 日的采集缺失，03/09 补做 SMPL 前先核对原料完整性。
 10. **命名不统一**：mosh 目录三种命名风格（`01` 的 `Boss_01_24points`、`02` 的 `02-boss-moshed`、`05` 的 `Boss_05_24points` + 拆分 session）。归拢脚本需做名称归一化映射。

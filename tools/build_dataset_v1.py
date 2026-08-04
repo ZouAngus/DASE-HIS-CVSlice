@@ -66,6 +66,11 @@ CAMS = ("topleft", "topcenter", "topright",
 # action numberings live in metadata/scene_map.json / label_map.json and are
 # append-only — once assigned, an id never changes.
 CAM_ID = {c: i + 1 for i, c in enumerate(CAMS)}
+# Scene aliases (group decision 2026-08): some actors' exports used a
+# different name for the same physical scene. Normalized BEFORE scene-id
+# assignment, so e.g. 02-sword and 13-elsdon share one S-id / X-Scene bucket.
+# File/tag names keep their original spelling.
+SCENE_ALIAS = {"sword": "elsdon"}
 
 
 def ntu_id(scene_id: int, cam_id: int, actor, rep: int, act_id: int) -> str:
@@ -295,7 +300,8 @@ def build(repo, actor, out, run, check_videos):
     if os.path.exists(sm_path):
         with open(sm_path, encoding="utf-8") as f:
             scene_map = json.load(f)
-    for sc in sorted({s["scene"] for s in samples.values()}):
+    for sc in sorted({SCENE_ALIAS.get(s["scene"], s["scene"])
+                      for s in samples.values()}):
         if sc not in scene_map:
             scene_map[sc] = len(scene_map) + 1
 
@@ -327,8 +333,8 @@ def build(repo, actor, out, run, check_videos):
         if len(s["views"]) < len(CAMS):
             missing = sorted(set(CAMS) - set(s["views"]))
             problems.append(f"{tag}: missing views {missing}")
-        sid = ntu_id(scene_map[s["scene"]], 0, actor, s["rep"],
-                     label_map[s["action"]] + 1)
+        sid = ntu_id(scene_map[SCENE_ALIAS.get(s["scene"], s["scene"])], 0,
+                     actor, s["rep"], label_map[s["action"]] + 1)
         s["sid"] = sid
         rows.append({
             "sample_id": tag, "ntu_id": sid, "actor": actor, "scene": s["scene"],
