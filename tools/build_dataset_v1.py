@@ -22,9 +22,18 @@ split_v0.json, 规划文档 P2.2/2.3):
   └── videos/{actor}-{scene}/{...}.mp4         7 views/action, copied as-is
       └── lists/mmaction_all.txt               "relpath label_id" per view-sample
 
-Decisions encoded (2026-08, Angus): skeletons at NATIVE mocap rate; videos are
-COPIED (self-contained dataset dir); corrected == *_edited.pkl present (else the
-pristine source is used and the sample is marked silver / uncorrected).
+Decisions encoded (2026-08, Angus): skeletons are RESAMPLED to the video rate
+(skeleton frame i corresponds to video frame i, ~30 fps; native-rate data stays
+in the source tree); per-view videos are trimmed by their corrector offsets at
+export (all views + skeleton frame-locked; sources untouched); corrected ==
+*_edited.pkl present (else the pristine source is used, sample marked silver).
+
+Alignment per action (mirrors the corrector's play-window logic): the video
+window [lo, hi] is the intersection over views of the offset-valid range, and
+the skeleton must cover round((i + skel_offset) * ratio) without clamping.
+Views needing a head shift (offset != 0 or lo > 0) are re-cut frame-exactly
+(sequential decode); head-aligned views are copied as-is — they may keep a few
+surplus TAIL frames beyond n_frames, which dataloaders should ignore.
 
 Safety: the *_edited.pkl provenance sidecar (.meta.json) is honoured — a
 sidecar naming a different action means the file is a mis-attribution leftover;
@@ -177,15 +186,75 @@ def scan_actor(repo, actor):
     return export_root, samples, problems
 
 
-def video_frames(path):
+def video_props(path):
+    """(n_frames, fps) via cv2; (-1, 0.0) if unavailable."""
     try:
         import cv2
         cap = cv2.VideoCapture(path)
-        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else -1
+        if not cap.isOpened():
+            return -1, 0.0
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = float(cap.get(cv2.CAP_PROP_FPS)) or 0.0
         cap.release()
-        return n
+        return n, fps
     except Exception:
-        return -1
+        return -1, 0.0
+
+
+def trim_video(src, dst, start, end, fps):
+    """Frame-exact re-cut of frames [start..end] (sequential decode, like the
+    corrector's _trim_video). Returns frames written."""
+    import cv2
+    cap = cv2.VideoCapture(src)
+    if not cap.isOpened():
+        return 0
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    vw = cv2.VideoWriter(dst, cv2.VideoWriter_fourcc(*"mp4v"),
+                         fps if fps > 0 else 30.0, (w, h))
+    skipped = 0
+    while skipped < max(0, start):
+        if not cap.grab():
+            vw.release(); cap.release()
+            return 0
+        skipped += 1
+    cur, n = max(0, start), 0
+    while cur <= end:
+        ret, frm = cap.read()
+        if not ret:
+            break
+        vw.write(frm)
+        cur += 1
+        n += 1
+    vw.release()
+    cap.release()
+    return n
+
+
+def align_window(n_skel, so, ratio, view_tots, view_offs):
+    """Video-frame window [lo, hi] valid for every view AND the skeleton
+    (mirrors the corrector's _recalc_play_range)."""
+    lo, hi = 0, min(view_tots.values()) - 1
+    for cam, tot in view_tots.items():
+        off = view_offs.get(cam, 0)
+        lo = max(lo, -off)
+        hi = min(hi, tot - 1 - off)
+
+    def skel_ok(i):
+        idx = int(round((i + so) * ratio))
+        return 0 <= idx <= n_skel - 1
+    while lo <= hi and not skel_ok(lo):
+        lo += 1
+    while hi >= lo and not skel_ok(hi):
+        hi -= 1
+    return lo, hi
+
+
+def resample_skel(pts, so, ratio, lo, hi):
+    """One skeleton frame per video frame i in [lo..hi]: round((i+so)*ratio)."""
+    idx = np.round((np.arange(lo, hi + 1) + so) * ratio).astype(int)
+    idx = np.clip(idx, 0, pts.shape[0] - 1)
+    return pts[idx]
 
 
 def build(repo, actor, out, run, check_videos):
@@ -221,24 +290,26 @@ def build(repo, actor, out, run, check_videos):
             except Exception as e:
                 problems.append(f"{tag}: skeleton load failed ({e})")
                 s["skel_src"] = None
-        n_vid = video_frames(next(iter(s["views"].values()))) if (check_videos and s["views"]) else -1
+        n_vid = (video_props(next(iter(s["views"].values())))[0]
+                 if (check_videos and s["views"]) else -1)
         if s["corrected"]:
             n_corrected += 1
         if s["skel_offset"] or s["view_offsets"]:
             n_offsets += 1
-            problems.append(f"{tag}: non-zero offsets in progress "
+            problems.append(f"{tag}: non-zero offsets "
                             f"(skel={s['skel_offset']}, views={s['view_offsets']}) "
-                            f"— skeleton/videos not frame-locked, re-check or bake")
+                            f"— these views will be re-cut at export to frame-lock")
         if len(s["views"]) < len(CAMS):
             missing = sorted(set(CAMS) - set(s["views"]))
             problems.append(f"{tag}: missing views {missing}")
         rows.append({
             "sample_id": tag, "actor": actor, "scene": s["scene"],
             "action": s["action"], "label_id": label_map[s["action"]],
-            "rep": s["rep"], "n_frames_skel": n_skel, "fps_skel": fps,
+            "rep": s["rep"], "n_frames": -1, "fps": 0.0,
+            "n_frames_skel_native": n_skel, "fps_skel_native": fps,
             "n_frames_video": n_vid, "n_views": len(s["views"]),
             "views": ";".join(sorted(s["views"])),
-            "corrected": s["corrected"],
+            "views_recut": "", "corrected": s["corrected"],
             "quality": "gold" if s["corrected"] else "silver",
             "skel_offset": s["skel_offset"],
             "view_offsets": json.dumps(s["view_offsets"]) if s["view_offsets"] else "",
@@ -266,32 +337,67 @@ def build(repo, actor, out, run, check_videos):
     if os.path.exists(sv):
         shutil.copy2(sv, os.path.join(md, "splits", "split_v0.json"))
 
-    n_skel_w, n_vid_w = 0, 0
+    n_skel_w, n_vid_w, n_recut = 0, 0, 0
     list_rows = []
+    row_by_id = {r["sample_id"]: r for r in rows}
     for tag in tags:
         s = samples[tag]
+        row = row_by_id[tag]
         adir = "{}-{}".format(actor, s["scene"])
-        if s["skel_src"]:
-            pts, fps = load_pkl_pts(s["skel_src"])
-            if not fps and s.get("src_pkl") and s["src_pkl"] != s["skel_src"]:
-                _, fps = load_pkl_pts(s["src_pkl"])
-            sk_dir = os.path.join(out, "skeletons", adir)
-            os.makedirs(sk_dir, exist_ok=True)
-            np.savez_compressed(
-                os.path.join(sk_dir, tag + ".npz"),
-                pts=np.ascontiguousarray(pts[:, :N_JOINTS], dtype=np.float32),
-                fps=np.float32(fps), corrected=bool(s["corrected"]),
-                actor=actor, scene=s["scene"], action=s["action"], rep=s["rep"])
-            n_skel_w += 1
+        if not s["skel_src"] or not s["views"]:
+            problems.append(f"{tag}: skipped (needs both skeleton and videos)")
+            continue
+        pts, src_fps = load_pkl_pts(s["skel_src"])
+        if not src_fps and s.get("src_pkl") and s["src_pkl"] != s["skel_src"]:
+            _, src_fps = load_pkl_pts(s["src_pkl"])
+        props = {cam: video_props(vp) for cam, vp in s["views"].items()}
+        view_tots = {c: p[0] for c, p in props.items() if p[0] > 0}
+        if not view_tots:
+            problems.append(f"{tag}: skipped (no readable video)")
+            continue
+        vfps = max((p[1] for p in props.values()), default=0.0) or 30.0
+        n_skel, min_vtot = pts.shape[0], min(view_tots.values())
+        ratio = ((n_skel - 1) / (min_vtot - 1)
+                 if n_skel > 1 and min_vtot > 1 else 1.0)
+        so = s["skel_offset"]
+        lo, hi = align_window(n_skel, so, ratio, view_tots, s["view_offsets"])
+        if hi < lo:
+            problems.append(f"{tag}: skipped (empty aligned window)")
+            continue
+        t_out = hi - lo + 1
+
+        # skeleton: one frame per video frame in [lo..hi], SMPL-22, 30fps-locked
+        sk22 = resample_skel(pts[:, :N_JOINTS], so, ratio, lo, hi)
+        sk_dir = os.path.join(out, "skeletons", adir)
+        os.makedirs(sk_dir, exist_ok=True)
+        np.savez_compressed(
+            os.path.join(sk_dir, tag + ".npz"),
+            pts=np.ascontiguousarray(sk22, dtype=np.float32),
+            fps=np.float32(vfps), src_fps=np.float32(src_fps),
+            corrected=bool(s["corrected"]),
+            actor=actor, scene=s["scene"], action=s["action"], rep=s["rep"])
+        n_skel_w += 1
+
+        # videos: re-cut views needing a head shift; copy head-aligned ones
         v_dir = os.path.join(out, "videos", adir)
         os.makedirs(v_dir, exist_ok=True)
+        recut = []
         for cam, vp in sorted(s["views"].items()):
             dst = os.path.join(v_dir, os.path.basename(vp))
-            if not os.path.exists(dst) or os.path.getsize(dst) != os.path.getsize(vp):
+            off = s["view_offsets"].get(cam, 0)
+            if off != 0 or lo > 0:
+                n = trim_video(vp, dst, lo + off, hi + off, vfps)
+                if n != t_out:
+                    problems.append(f"{tag}/{cam}: re-cut wrote {n}/{t_out} frames")
+                recut.append(cam)
+                n_recut += 1
+            elif not os.path.exists(dst) or os.path.getsize(dst) != os.path.getsize(vp):
                 shutil.copy2(vp, dst)
             n_vid_w += 1
             list_rows.append("videos/{}/{} {}".format(
                 adir, os.path.basename(vp), label_map[s["action"]]))
+        row.update({"n_frames": t_out, "fps": round(vfps, 3),
+                    "views_recut": ";".join(recut)})
         cal_src = os.path.join(s["scene_dir"], "calibration")
         cal_dst = os.path.join(md, "calibration", adir)
         if os.path.isdir(cal_src) and not os.path.isdir(cal_dst):
@@ -308,16 +414,23 @@ def build(repo, actor, out, run, check_videos):
         f.write("\n".join(list_rows) + "\n")
     with open(os.path.join(out, "README.md"), "w", encoding="utf-8") as f:
         f.write("# CAVEAT dataset (build v1, work-in-progress)\n\n"
-                "- Joint set: SMPL-22 (benchmark/joints.md v1); world coords, metres;"
-                " native mocap rate.\n"
-                "- skeletons/: one .npz per action — pts float32 (T,22,3), fps,"
-                " corrected flag.\n- videos/: per-view mp4 clips (view label in"
-                " filename); lists/mmaction_all.txt = `relpath label_id`.\n"
-                "- metadata/: label_map.json, samples.csv (incl. gold/silver +"
-                " leftover offsets), graph.py, splits/.\n"
+                "- Joint set: SMPL-22 (benchmark/joints.md v1); world coords, metres.\n"
+                "- skeletons/: one .npz per action — pts float32 (T,22,3) RESAMPLED"
+                " to the video rate: skeleton frame i == video frame i (fps field;"
+                " src_fps = native mocap rate).\n"
+                "- videos/: per-view mp4 clips, offset-aligned at export (view label"
+                " in filename); head-aligned copies may keep surplus TAIL frames"
+                " beyond samples.csv n_frames — ignore them.\n"
+                "- lists/mmaction_all.txt = `relpath label_id` per view-sample.\n"
+                "- metadata/: label_map.json, samples.csv (gold/silver, applied"
+                " offsets, re-cut views), graph.py, splits/.\n"
                 "- Generated by tools/build_dataset_v1.py — do not hand-edit.\n")
-    print(f"\nWROTE: {n_skel_w} skeleton npz, {n_vid_w} videos, "
-          f"{len(rows)} samples.csv rows -> {out}")
+    if problems:
+        print(f"\n--- post-run problems ({len(problems)} total incl. scan) ---")
+        for p in problems[-20:]:
+            print("  !", p)
+    print(f"\nWROTE: {n_skel_w} skeleton npz, {n_vid_w} videos "
+          f"({n_recut} re-cut for alignment), {len(rows)} samples.csv rows -> {out}")
 
 
 def main():
