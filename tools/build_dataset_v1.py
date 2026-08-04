@@ -60,6 +60,17 @@ import numpy as np
 
 CAMS = ("topleft", "topcenter", "topright",
         "bottomleft", "bottomcenter", "bottomright", "diagonal")
+# NTU-style IDs: SsssCcccPpppRrrrAaaa (S=scene/setup, C=camera, P=performer,
+# R=replication, A=action class). Camera numbering is FIXED by CAMS order
+# (C001..C007); C000 marks the shared (all-view) skeleton file. Scene and
+# action numberings live in metadata/scene_map.json / label_map.json and are
+# append-only — once assigned, an id never changes.
+CAM_ID = {c: i + 1 for i, c in enumerate(CAMS)}
+
+
+def ntu_id(scene_id: int, cam_id: int, actor, rep: int, act_id: int) -> str:
+    return "S{:03d}C{:03d}P{:03d}R{:03d}A{:03d}".format(
+        scene_id, cam_id, int(actor), rep, act_id)
 NAME_RE = re.compile(
     r"^(?P<actor>\d+)-(?P<scene>[A-Za-z]+)-"
     r"(?:(?P<cam>" + "|".join(CAMS) + r")-)?"
@@ -278,6 +289,16 @@ def build(repo, actor, out, run, check_videos):
         if a not in label_map:
             label_map[a] = len(label_map)
 
+    # scene map (append-only, S-ids start at 1)
+    sm_path = os.path.join(out, "metadata", "scene_map.json")
+    scene_map = {}
+    if os.path.exists(sm_path):
+        with open(sm_path, encoding="utf-8") as f:
+            scene_map = json.load(f)
+    for sc in sorted({s["scene"] for s in samples.values()}):
+        if sc not in scene_map:
+            scene_map[sc] = len(scene_map) + 1
+
     rows, n_corrected, n_offsets = [], 0, 0
     for tag in tags:
         s = samples[tag]
@@ -306,8 +327,11 @@ def build(repo, actor, out, run, check_videos):
         if len(s["views"]) < len(CAMS):
             missing = sorted(set(CAMS) - set(s["views"]))
             problems.append(f"{tag}: missing views {missing}")
+        sid = ntu_id(scene_map[s["scene"]], 0, actor, s["rep"],
+                     label_map[s["action"]] + 1)
+        s["sid"] = sid
         rows.append({
-            "sample_id": tag, "actor": actor, "scene": s["scene"],
+            "sample_id": tag, "ntu_id": sid, "actor": actor, "scene": s["scene"],
             "action": s["action"], "label_id": label_map[s["action"]],
             "rep": s["rep"], "n_frames": -1, "fps": 0.0,
             "n_frames_skel": -1,
@@ -323,6 +347,12 @@ def build(repo, actor, out, run, check_videos):
     print(f"corrected  : {n_corrected}/{len(tags)} actions have *_edited.pkl (gold)")
     print(f"offsets    : {n_offsets} actions still carry non-zero offsets")
     print(f"classes    : {len(label_map)} distinct action strings")
+    print(f"scenes     : {len(scene_map)} -> " +
+          ", ".join(f"S{v:03d}={k}" for k, v in sorted(scene_map.items(), key=lambda kv: kv[1])))
+    if tags:
+        ex = samples[tags[0]]
+        print("naming     : files keep the readable tag names for now; future"
+              " NTU id precomputed, e.g. {} -> {}".format(tags[0], ex["sid"]))
     if problems:
         print(f"\n--- {len(problems)} problems/warnings ---")
         for p in problems:
@@ -341,6 +371,11 @@ def build(repo, actor, out, run, check_videos):
     sv = os.path.join(repo, "benchmark", "split_v0.json")
     if os.path.exists(sv):
         shutil.copy2(sv, os.path.join(md, "splits", "split_v0.json"))
+
+    with open(sm_path, "w", encoding="utf-8") as f:
+        json.dump(scene_map, f, indent=2, ensure_ascii=False, sort_keys=True)
+    with open(os.path.join(md, "camera_map.json"), "w", encoding="utf-8") as f:
+        json.dump(CAM_ID, f, indent=2)
 
     n_skel_w, n_vid_w, n_recut = 0, 0, 0
     list_rows = []
@@ -373,6 +408,8 @@ def build(repo, actor, out, run, check_videos):
 
         # skeleton: NATIVE-rate slice covering the aligned window, SMPL-22.
         # Dataloaders map video frame i -> skeleton index round(i*ratio).
+        # Readable tag names for now; NTU renaming happens later in one pass
+        # via apply_ntu_naming.py (ntu_id precomputed in samples.csv).
         sk22, slo = skel_window(pts[:, :N_JOINTS], so, ratio, lo, hi)
         sk_dir = os.path.join(out, "skeletons", adir)
         os.makedirs(sk_dir, exist_ok=True)
@@ -381,7 +418,7 @@ def build(repo, actor, out, run, check_videos):
             pts=np.ascontiguousarray(sk22, dtype=np.float32),
             fps=np.float32(src_fps), video_fps=np.float32(vfps),
             ratio=np.float64(ratio), n_frames_video=np.int64(t_out),
-            corrected=bool(s["corrected"]),
+            corrected=bool(s["corrected"]), ntu_id=s["sid"], tag=tag,
             actor=actor, scene=s["scene"], action=s["action"], rep=s["rep"])
         n_skel_w += 1
 
@@ -433,7 +470,19 @@ def build(repo, actor, out, run, check_videos):
                 "- lists/mmaction_all.txt = `relpath label_id` per view-sample.\n"
                 "- metadata/: label_map.json, samples.csv (gold/silver, applied"
                 " offsets, re-cut views), graph.py, splits/.\n"
+                "- NAMING: files currently use readable tags"
+                " ({actor}-{scene}-[{cam}-]{action}-rep{N}). The final NTU-style"
+                " ids (SsssCcccPpppRrrrAaaa) are PRECOMPUTED in samples.csv"
+                " (ntu_id column; C000 = shared skeleton) + scene_map.json /"
+                " camera_map.json. Once ALL actors are in, run"
+                " `python apply_ntu_naming.py --run` (in this directory) to"
+                " rename everything in one pass.\n"
                 "- Generated by tools/build_dataset_v1.py — do not hand-edit.\n")
+    # ship the future renaming tool inside the dataset (self-contained archive)
+    renamer = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "apply_ntu_naming.py")
+    if os.path.exists(renamer):
+        shutil.copy2(renamer, os.path.join(out, "apply_ntu_naming.py"))
     if problems:
         print(f"\n--- post-run problems ({len(problems)} total incl. scan) ---")
         for p in problems[-20:]:
