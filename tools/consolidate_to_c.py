@@ -44,15 +44,21 @@ import sys
 JUNK = ("Thumbs.db", ".DS_Store")
 SCENE_RE = re.compile(r"(boss|elsdon|gallery|star|travel|trove|sword)", re.I)
 SLICED_SRC = {  # actor -> subdir of E:\sliced_videos_and_csvs
-    "01": "01", "02": "02", "04": "04", "05": "05", "06": "06_updated",
-    "07": "07", "11": "11", "12": "12", "14": "14",
+    "01": "01", "02": "02", "03": "03", "04": "04", "05": "05",
+    "06": "06_updated", "07": "07", "08": "08", "10": "10",
+    "11": "11", "12": "12", "14": "14",
 }
-MOSH_ACTORS = ["01", "02", "04", "05", "06", "07", "08", "10", "11", "12"]
+MOSH_SRC = {  # actor -> subdir of E:\mosh-results (08/10 renamed *-edited
+    # in Aug-2026 drop; those supersede the old E:\08-boss redo)
+    "01": "01", "02": "02", "03": "03", "04": "04", "05": "05",
+    "06": "06", "07": "07", "08": "08-edited", "10": "10-edited",
+    "11": "11", "12": "12",
+}
 SKIP_DIR_TOKENS = ("_old", "05-star-002")
 
 
 def is_junk(name: str) -> bool:
-    return name.startswith("._") or name in JUNK
+    return name.startswith("._") or name in JUNK or name.endswith(".bak")
 
 
 def scene_of(dirname: str):
@@ -72,13 +78,15 @@ class Copier:
                                # differing base copy is EXPECTED, not a clash
 
     def copy_tree(self, src_root: str, dst_root: str, label: str,
-                  register: bool = False):
-        """Copy src_root/** into dst_root, first-wins, junk-filtered."""
+                  register: bool = False, skip_pkl: bool = False):
+        """Copy src_root/** into dst_root, first-wins, junk-filtered.
+        skip_pkl: for sliced sources — mosh pkls misplaced there (e.g. the
+        54 stageii sitting in sliced 08-star) are NOT videos, don't copy."""
         for dirpath, dirnames, filenames in os.walk(src_root):
             dirnames[:] = [d for d in dirnames if not is_junk(d)]
             rel = os.path.relpath(dirpath, src_root)
             for fn in filenames:
-                if is_junk(fn):
+                if is_junk(fn) or (skip_pkl and fn.endswith(".pkl")):
                     continue
                 sp = os.path.join(dirpath, fn)
                 dp = os.path.join(dst_root, rel, fn) if rel != "." \
@@ -168,27 +176,20 @@ def build(cp: "Copier", E: str, dest: str):
         for sc, dirs in sorted(scenes.items()):
             # base dir (shortest name) first, retakes fill the gaps
             for p in sorted(dirs, key=lambda x: len(os.path.basename(x))):
+                # flatten accidental double-nesting (08\08-boss\08-boss\...)
+                inner = os.path.join(p, os.path.basename(p))
+                if os.path.isdir(inner):
+                    p = inner
                 cp.copy_tree(p, os.path.join(exp, f"{actor}-{sc}"),
-                             f"{actor}:{sc}")
+                             f"{actor}:{sc}", skip_pkl=True)
             if len(dirs) > 1:
                 plan.append(f"{actor}: merged {len(dirs)} dirs -> {actor}-{sc}")
 
-    # 08's single-scene slice lives in E:\08-boss\08-boss
-    p08 = os.path.join(E, "08-boss", "08-boss")
-    if os.path.isdir(p08):
-        cp.copy_tree(p08, os.path.join(dest, "08", "exported_08", "08-boss"),
-                     "08:boss-slice")
-        plan.append("08: sliced boss scene from E:\\08-boss")
-
     # ---------- mosh skeletons ----------
-    # 08 redo FIRST so it wins over the original 08 mosh
-    p08m = os.path.join(E, "08-boss", "08-boss-moshed")
-    if os.path.isdir(p08m):
-        cp.copy_tree(p08m, os.path.join(dest, "smpl", "08", "08-boss"),
-                     "08:mosh-redo", register=True)
-        plan.append("08: boss mosh redo (E:\\08-boss) takes priority")
-    for actor in MOSH_ACTORS:
-        src = os.path.join(E, "mosh-results", actor)
+    # (E:\08-boss old redo intentionally NOT used — superseded by the
+    #  Aug-2026 mosh-results\08-edited drop, which has 62 edited boss pkls)
+    for actor, sub in sorted(MOSH_SRC.items()):
+        src = os.path.join(E, "mosh-results", sub)
         if not os.path.isdir(src):
             print(f"!! missing on E: {src}")
             continue
