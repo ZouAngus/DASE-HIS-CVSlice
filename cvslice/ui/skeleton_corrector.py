@@ -955,6 +955,11 @@ class SkeletonCorrector(QMainWindow):
         self.folder = folder
         self.calibs = calibs
         self._actions = actions
+        # The old action index is meaningless in the NEW actions list — indexing
+        # with it crashed (IndexError) or, worse, auto-saved the OUTGOING
+        # scene's skeleton under a NEW scene action's tag. The outgoing scene
+        # was already flushed by _save_progress above, so just invalidate.
+        self._cur_action_idx = -1
         self._progress = self._load_progress(folder)
         self._edited.clear()    # edited skeletons restored per-action from _edited.pkl
 
@@ -1184,7 +1189,8 @@ class SkeletonCorrector(QMainWindow):
         # was actually EDITED (interp/smooth/drag changed it from the source),
         # auto-save it now. A view-only visit leaves it == source -> not cached
         # -> nothing written.
-        if self.pts3d is not None and self._cur_action_idx >= 0:
+        if (self.pts3d is not None
+                and 0 <= self._cur_action_idx < len(self._actions)):
             out_tag = self._actions[self._cur_action_idx]["tag"]
             self._capture_current_progress()
             if out_tag in self._edited:                 # edited, not view-only
