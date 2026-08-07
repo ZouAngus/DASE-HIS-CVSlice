@@ -82,12 +82,17 @@ class Copier:
                                # differing base copy is EXPECTED, not a clash
 
     def copy_tree(self, src_root: str, dst_root: str, label: str,
-                  register: bool = False, skip_pkl: bool = False):
+                  register: bool = False, skip_pkl: bool = False,
+                  exclude_top: str | None = None):
         """Copy src_root/** into dst_root, first-wins, junk-filtered.
         skip_pkl: for sliced sources — mosh pkls misplaced there (e.g. the
-        54 stageii sitting in sliced 08-star) are NOT videos, don't copy."""
+        54 stageii sitting in sliced 08-star) are NOT videos, don't copy.
+        exclude_top: a top-level subdir name to skip (used to avoid
+        re-recursing into an accidental same-name nested dir)."""
         for dirpath, dirnames, filenames in os.walk(src_root):
             dirnames[:] = [d for d in dirnames if not is_junk(d)]
+            if exclude_top and dirpath == src_root and exclude_top in dirnames:
+                dirnames.remove(exclude_top)
             rel = os.path.relpath(dirpath, src_root)
             for fn in filenames:
                 if is_junk(fn) or (skip_pkl and fn.endswith(".pkl")):
@@ -180,12 +185,19 @@ def build(cp: "Copier", E: str, dest: str):
         for sc, dirs in sorted(scenes.items()):
             # base dir (shortest name) first, retakes fill the gaps
             for p in sorted(dirs, key=lambda x: len(os.path.basename(x))):
-                # flatten accidental double-nesting (08\08-boss\08-boss\...)
+                dst = os.path.join(exp, f"{actor}-{sc}")
+                # accidental same-name nesting (08\08-boss\08-boss\...,
+                # or an EMPTY nested placeholder as in 10-gallery): copy
+                # BOTH layers into the same dest — outer first (wins),
+                # inner fills whatever the outer lacked. Handles
+                # outer-full/inner-empty AND outer-empty/inner-full.
                 inner = os.path.join(p, os.path.basename(p))
                 if os.path.isdir(inner):
-                    p = inner
-                cp.copy_tree(p, os.path.join(exp, f"{actor}-{sc}"),
-                             f"{actor}:{sc}", skip_pkl=True)
+                    cp.copy_tree(p, dst, f"{actor}:{sc}", skip_pkl=True,
+                                 exclude_top=os.path.basename(p))
+                    cp.copy_tree(inner, dst, f"{actor}:{sc}", skip_pkl=True)
+                else:
+                    cp.copy_tree(p, dst, f"{actor}:{sc}", skip_pkl=True)
             if len(dirs) > 1:
                 plan.append(f"{actor}: merged {len(dirs)} dirs -> {actor}-{sc}")
 
