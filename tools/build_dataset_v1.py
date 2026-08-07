@@ -27,8 +27,21 @@ rate — the npz stores the native-rate slice covering the aligned window plus
 (fps, video_fps, ratio) so dataloaders map video frame i -> skeleton frame
 round(i * ratio); per-view videos are trimmed by their corrector offsets at
 export (frame-locked to the window; sources untouched); videos are COPIED
-(self-contained dir); corrected == *_edited.pkl present (else pristine source,
-sample marked silver). Output root: <repo>/data/release/CAVEAT_v0.
+(self-contained dir). Output root: <repo>/data/release/CAVEAT_v0.
+
+Quality marking (group convention, 2026-08): annotators save *_edited.pkl
+ONLY for clips that needed changes; reviewed-and-fine clips keep the bare
+stageii. A clip without _edited is therefore NOT lower quality. samples.csv
+carries two factual columns instead of a gold/silver verdict:
+  edited   = this clip has a manual-correction pkl
+  reviewed = this clip went through human review — true if its scene has any
+             _edited file (a touched scene was watched end-to-end), or if the
+             actor is declared fully reviewed in benchmark/review_status.json
+             ({"08": "all", ...}).
+Bad samples: benchmark/bad_samples.txt (one tag per line, optional
+"<tab>reason"; # comments) lists unusable clips NTU-style. They are excluded
+from skeletons/videos/lists entirely and recorded in
+metadata/bad_samples.txt so downstream users can see what was dropped.
 
 Alignment per action (mirrors the corrector's play-window logic): the video
 window [lo, hi] is the intersection over views of the offset-valid range, and
@@ -284,6 +297,29 @@ def build(repo, actor, out, run, check_videos):
     print(f"samples    : {len(tags)} actions, "
           f"{sum(len(s['views']) for s in samples.values())} view-videos")
 
+    # ---- bad-sample list (NTU-style) + review status ------------------------
+    bad = {}   # tag -> reason
+    bad_path = os.path.join(repo, "benchmark", "bad_samples.txt")
+    if os.path.exists(bad_path):
+        with open(bad_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    t, _, why = line.partition("\t")
+                    bad[t.strip()] = why.strip() or "listed in bad_samples.txt"
+    excluded = [(t, bad[t]) for t in tags if t in bad]
+    tags = [t for t in tags if t not in bad]
+    for t, why in excluded:
+        samples.pop(t, None)
+
+    review_all = set()   # actors declared fully human-reviewed
+    rs_path = os.path.join(repo, "benchmark", "review_status.json")
+    if os.path.exists(rs_path):
+        with open(rs_path, encoding="utf-8") as f:
+            review_all = {a for a, v in json.load(f).items() if v == "all"}
+    # scene-level inference: any _edited in a scene => that scene was watched
+    scenes_reviewed = {s["scene"] for s in samples.values() if s["corrected"]}
+
     # ---- label map (stable: never renumber an existing file) ----------------
     lm_path = os.path.join(out, "metadata", "label_map.json")
     label_map = {}
@@ -336,6 +372,8 @@ def build(repo, actor, out, run, check_videos):
         sid = ntu_id(scene_map[SCENE_ALIAS.get(s["scene"], s["scene"])], 0,
                      actor, s["rep"], label_map[s["action"]] + 1)
         s["sid"] = sid
+        s["reviewed"] = (str(actor) in review_all
+                         or s["scene"] in scenes_reviewed)
         rows.append({
             "sample_id": tag, "ntu_id": sid, "actor": actor, "scene": s["scene"],
             "action": s["action"], "label_id": label_map[s["action"]],
@@ -344,13 +382,22 @@ def build(repo, actor, out, run, check_videos):
             "n_frames_skel_native": n_skel, "fps_skel_native": fps,
             "n_frames_video": n_vid, "n_views": len(s["views"]),
             "views": ";".join(sorted(s["views"])),
-            "views_recut": "", "corrected": s["corrected"],
-            "quality": "gold" if s["corrected"] else "silver",
+            "views_recut": "", "edited": s["corrected"],
+            "reviewed": s["reviewed"],
             "skel_offset": s["skel_offset"],
             "view_offsets": json.dumps(s["view_offsets"]) if s["view_offsets"] else "",
         })
 
-    print(f"corrected  : {n_corrected}/{len(tags)} actions have *_edited.pkl (gold)")
+    n_reviewed = sum(1 for t in tags if samples[t]["reviewed"])
+    if excluded:
+        print(f"bad list   : {len(excluded)} samples excluded per"
+              " benchmark/bad_samples.txt")
+        for t, why in excluded:
+            print(f"             - {t}: {why}")
+    print(f"edited     : {n_corrected}/{len(tags)} clips have a manual"
+          " correction (*_edited.pkl)")
+    print(f"reviewed   : {n_reviewed}/{len(tags)} clips human-reviewed"
+          " (scene has edits, or actor declared in review_status.json)")
     print(f"offsets    : {n_offsets} actions still carry non-zero offsets")
     print(f"classes    : {len(label_map)} distinct action strings")
     print(f"scenes     : {len(scene_map)} -> " +
@@ -424,7 +471,8 @@ def build(repo, actor, out, run, check_videos):
             pts=np.ascontiguousarray(sk22, dtype=np.float32),
             fps=np.float32(src_fps), video_fps=np.float32(vfps),
             ratio=np.float64(ratio), n_frames_video=np.int64(t_out),
-            corrected=bool(s["corrected"]), ntu_id=s["sid"], tag=tag,
+            edited=bool(s["corrected"]), reviewed=bool(s["reviewed"]),
+            ntu_id=s["sid"], tag=tag,
             actor=actor, scene=s["scene"], action=s["action"], rep=s["rep"])
         n_skel_w += 1
 
@@ -459,6 +507,15 @@ def build(repo, actor, out, run, check_videos):
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(rows)
+    bs_out = os.path.join(md, "bad_samples.txt")
+    seen_bad = set()
+    if os.path.exists(bs_out):
+        with open(bs_out, encoding="utf-8") as f:
+            seen_bad = {l.split("\t")[0].strip() for l in f if l.strip()}
+    with open(bs_out, "a", encoding="utf-8") as f:
+        for t, why in excluded:
+            if t not in seen_bad:
+                f.write(f"{t}\t{why}\n")
     ld = os.path.join(out, "videos", "lists")
     os.makedirs(ld, exist_ok=True)
     with open(os.path.join(ld, "mmaction_all.txt"), "w", encoding="utf-8") as f:
@@ -474,8 +531,13 @@ def build(repo, actor, out, run, check_videos):
                 " in filename); head-aligned copies may keep surplus TAIL frames"
                 " beyond samples.csv n_frames — ignore them.\n"
                 "- lists/mmaction_all.txt = `relpath label_id` per view-sample.\n"
-                "- metadata/: label_map.json, samples.csv (gold/silver, applied"
-                " offsets, re-cut views), graph.py, splits/.\n"
+                "- metadata/: label_map.json, samples.csv (edited/reviewed"
+                " flags, applied offsets, re-cut views), graph.py, splits/,"
+                " bad_samples.txt (excluded clips + reasons).\n"
+                "- QUALITY: `edited` = clip has a manual correction;"
+                " `reviewed` = clip went through human review (clips without"
+                " _edited were watched and needed no fix — NOT lower"
+                " quality).\n"
                 "- NAMING: files currently use readable tags"
                 " ({actor}-{scene}-[{cam}-]{action}-rep{N}). The final NTU-style"
                 " ids (SsssCcccPpppRrrrAaaa) are PRECOMPUTED in samples.csv"

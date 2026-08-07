@@ -21,20 +21,20 @@ A → B 的路径 = align 对齐 + 人工修正；B 之后无人工环节。
 | 08 | 249/301 有改动 | **组内确认修正完成**。唯一硬伤：08-star 切片视频缺失（sliced\08-star 里是骨骼目录的误拷副本，与 mosh 侧 54 个 stageii 逐字节相同）→ star 场景补上视频前进不了库 |
 | 10 | 204/298 有改动 | **组内确认修正完成**，六场景切片齐。留意两个可疑 pkl（`_WEIRD`/`_old` 后缀）|
 
-> 注意：`build_dataset_v1.py` 的 gold/silver 标记按"有无 _edited"机械判定——按新口径"验过无需改"的条目也应算 gold。**待组里拍板**：是保留机械口径（无改动=silver），还是给 08/10/15 加"整人验收"标记全部升 gold。论文 edit mask 统计口径同此。
+> 质量口径已定版（2026-08）：**弃用 gold/silver**。samples.csv 记两个事实列——`edited`（有人工修正文件）+ `reviewed`（经过人工检查：场景内有任一 _edited 即推断整场景已查，或演员在 `benchmark/review_status.json` 声明整人验收，现已声明 08/10/15）。"没改动"≠"没检查"，检查过无需改的数据与修正过的同级。另加 NTU 式坏样本机制：`benchmark/bad_samples.txt` 列出的不可用样本（首个条目：15-boss-cut_use_laser_to_reflect-rep3 仅 1 视角）建库时整体排除并抄录进 release 的 metadata。
 
 ## A 类（10 人）
 
 | 演员 | 动作数 | 备注 |
 |------|--------|------|
 | 01 | 302 | |
-| 02 | 232 | sword=elsdon（构建脚本已归一化）|
+| 02 | 232 | sword=elsdon 已归一化；**mosh 与切片数量不吻合**（boss 46pkl/41csv、star 45/34、travel 37/41，须核对）|
 | 03 | 305（新到！46 个已修正） | 切片七目录齐全；boss 有重复目录（03-003-boss / 03-2-boss-moshed，汇总脚本自动合并）；travel 的 walking_clockwise-rep1 拆成 part1/part2 |
-| 04 | 178 | 无 elsdon 场景 |
+| 04 | 178 | 无 elsdon；**04-boss 每动作仅 6 视角**（缺一路相机，228=6×38）|
 | 05 | 302 | 补拍目录碎片化，汇总脚本自动合并 |
 | 06 | 297 | 切片目录为 `06_updated`；含 sword |
 | 07 | 297 | 完整无问题 |
-| 11 | 266 | 前置：`11_changed_csv` 补丁（汇总脚本自动优先）|
+| 11 | 266 | 补丁自动优先；11/12 有 30hz 版（pkls/ 子目录，此前漏扫已纠正）；**11-travel-02 的 12 个动作有切片无 mosh** |
 | 12 | 302 | 前置：`12_changed_csv` 补丁（同上）|
 | 13 | 254 | 已对齐+自验证；elsdon 37 动作缺视频；15 个视角小残差待微调 |
 

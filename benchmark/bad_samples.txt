@@ -1,0 +1,12 @@
+# CAVEAT 坏样本清单（NTU-style bad sample list）
+# 格式：每行一个样本 tag，可选 <TAB> 后写原因；# 开头为注释。
+# build_dataset_v1.py 读取本文件：列出的样本不进数据集（不拷骨架/视频、
+# 不进 mmaction 清单），并抄录到 release 的 metadata/bad_samples.txt。
+# 判定标准：数据本身不可用（缺视角过多、导出损坏、动作错误无法归类等）。
+# 修一修还能用的不要放这里——去修。
+#
+# ---- 已确认 ----
+15-boss-cut_use_laser_to_reflect-rep3	仅 1 个视角（缺 6 路视频）
+#
+# ---- 待确认候选（组里过目后去掉 # 或删除该行）----
+# 05-star play_game_for_2_minutes 系列：导出损坏（0 字节无扩展名文件），确认后按实际 tag 列出
