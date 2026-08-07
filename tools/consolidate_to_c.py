@@ -44,13 +44,17 @@ import sys
 JUNK = ("Thumbs.db", ".DS_Store")
 SCENE_RE = re.compile(r"(boss|elsdon|gallery|star|travel|trove|sword)", re.I)
 SLICED_SRC = {  # actor -> subdir of E:\sliced_videos_and_csvs
-    "01": "01", "02": "02", "03": "03", "04": "04", "05": "05",
+    # 02 and 04 DROPPED from the dataset (group decision 2026-08: skeleton
+    # quality doubts + limited annotation manpower; 02 also has 9 unsliced/
+    # unmoshed gaps, 04 lost the whole bottomright camera in boss). Their
+    # data stays untouched on E: — re-add here to resurrect.
+    "01": "01", "03": "03", "05": "05",
     "06": "06_updated", "07": "07", "08": "08", "10": "10",
     "11": "11", "12": "12", "14": "14",
 }
 MOSH_SRC = {  # actor -> subdir of E:\mosh-results (08/10 renamed *-edited
     # in Aug-2026 drop; those supersede the old E:\08-boss redo)
-    "01": "01", "02": "02", "03": "03", "04": "04", "05": "05",
+    "01": "01", "03": "03", "05": "05",
     "06": "06", "07": "07", "08": "08-edited", "10": "10-edited",
     "11": "11", "12": "12",
 }
