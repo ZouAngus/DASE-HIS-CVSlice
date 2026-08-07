@@ -64,15 +64,19 @@ def main():
 
     note(f"{'RUN' if run else 'DRY-RUN'} storage restructure | repo={repo} | E={E}")
 
-    # -- 1. delete repo _to_delete ------------------------------------------
+    # -- 1. quarantine report ONLY — never blind-delete ---------------------
+    # _to_delete holds junk AND quarantined raw/old-sliced copies. Deleting
+    # is deferred to verify_quarantine.py, which first PROVES (name+size,
+    # optional hash) that every non-junk file has a counterpart on E: and
+    # only then purges the proven ones. Space is sufficient without it.
     td = os.path.join(repo, "_to_delete")
     if os.path.isdir(td):
         sz = sum(os.path.getsize(os.path.join(dp, f))
                  for dp, _, fs in os.walk(td) for f in fs
                  if os.path.exists(os.path.join(dp, f))) / 1e9
-        note(f"[1] delete {td} ({sz:.1f} GB)")
-        if run:
-            shutil.rmtree(td, ignore_errors=True)
+        note(f"[1] quarantine {td} ({sz:.1f} GB) KEPT — run"
+             f" tools\\verify_quarantine.py afterwards to prove redundancy"
+             f" and purge safely")
     else:
         note("[1] _to_delete already gone — skip")
 
