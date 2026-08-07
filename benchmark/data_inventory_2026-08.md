@@ -28,13 +28,13 @@ A → B 的路径 = align 对齐 + 人工修正；B 之后无人工环节。
 | 演员 | 动作数 | 备注 |
 |------|--------|------|
 | 01 | 302 | |
-| 02 | 232 | sword=elsdon 已归一化；**mosh 与切片数量不吻合**（boss 46pkl/41csv、star 45/34、travel 37/41，须核对）|
+| 02 | 232 | ⚠️ **考虑整体放弃（骨架质量存疑，Angus 评估中）**。缺口详情：boss laser rep4-8、star sword rep3-13 有骨骼无切片；travel grab_box rep3-5+net rep2 有切片无骨骼；02_002-trove dodge_car×5 未跑 mosh |
 | 03 | 305（新到！46 个已修正） | 切片七目录齐全；boss 有重复目录（03-003-boss / 03-2-boss-moshed，汇总脚本自动合并）；travel 的 walking_clockwise-rep1 拆成 part1/part2 |
-| 04 | 178 | 无 elsdon；**04-boss 每动作仅 6 视角**（缺一路相机，228=6×38）|
+| 04 | 178 | ⚠️ **考虑整体放弃（骨架质量存疑，Angus 评估中）**。04-boss 整路 bottomright 相机缺失（38 动作全部仅 6 视角，正片和 check 同缺）|
 | 05 | 302 | 补拍目录碎片化，汇总脚本自动合并 |
 | 06 | 297 | 切片目录为 `06_updated`；含 sword |
 | 07 | 297 | 完整无问题 |
-| 11 | 266 | 补丁自动优先；11/12 有 30hz 版（pkls/ 子目录，此前漏扫已纠正）；**11-travel-02 的 12 个动作有切片无 mosh** |
+| 11 | 266 | 补丁自动优先；11/12 有 30hz 版（pkls/ 子目录，此前漏扫已纠正）；**11-travel-02 的 12 个动作有切片无 mosh**——切片已确认完整（12 csv×7 视角+check+标定+offsets 全齐：grab_box×6、measure_length×3、throwing_net×3），原始动捕 `Data_2026\\csv_data\\Travel_11_002.csv`（678MB）在，**待重跑 mosh**（流程同 13 号的服务器工作区）|
 | 12 | 302 | 前置：`12_changed_csv` 补丁（同上）|
 | 13 | 254 | 已对齐+自验证；elsdon 37 动作缺视频；15 个视角小残差待微调 |
 
@@ -47,7 +47,7 @@ A → B 的路径 = align 对齐 + 人工修正；B 之后无人工环节。
 
 ## 问题清单
 
-1. **08-star**：切片目录内容放错（54 个 stageii pkl，无视频/CSV/标定），真正的 star 切片缺失需重导；修正也是 0。汇总脚本已自动跳过错放的 pkl。
+1. **08-star**：已确认为同事拷贝失误——切片目录被误拷成骨骼目录（54 个 pkl）。等同事补拷 star 场景切片视频（预计 ~50 csv + ~370 mp4 + calibration）。汇总脚本已自动跳过错放的 pkl。
 2. **13 号**：`13-boss` 仅 `shooting-rep1` 缺 6 视角；`13-elsdon` 仅 2 个动作有视频，需整场重导；15 个对齐残差视角清单见附录（travel 占 12，长片段片内漂移）。
 3. **03 号重复目录**：切片 `03-003-boss`（24 动作，文件名就是 03-boss-*）与 `03-boss`（44 动作）、mosh `03-2-boss-moshed`（24）与 `03-boss-moshed`（44）——疑似两次会话拆分。汇总脚本合并进 03-boss，同名不同大小的会记入冲突单待裁决。
 4. **10 号杂物**：168 个 `.mp4.bak`（脚本已过滤）；mosh 目录名混乱（大写 Boss、结尾连字符）；两个可疑 pkl（`_WEIRD`、`_old` 后缀）修正时留意；10-elsdon shooting-rep2 缺 7 个 check 片。
@@ -61,6 +61,10 @@ A → B 的路径 = align 对齐 + 人工修正；B 之后无人工环节。
 - **C 盘（固定）= 处理数据**：统一 `cvslice\data\{人}\exported_{人}` + `data\smpl\{人}`，用 `tools\consolidate_to_c.py` 从 E 汇入（E 只读、先干跑、冲突只报）。
 - **E 盘（流动）= 原始数据**：`E:\Data_2026` 已验证为 `C:\cv_data_2026` 完整超集（唯二差异 Boss_07/Travel_07 新版已在 E 根目录待归位）→ 归位后 `C:\cv_data_2026` 可删。
 - 已从 C 盘 `data\` 清出 101 GB 原始数据到 `_to_delete\raw_data_cleared\`。
+
+## 已定清理项（2026-08 追加，脚本自动处理）
+
+组内已确认可清理的残留（`cleanup_data_drive.py` 移入 `_review_before_delete`）：03-travel 的 14 个 `-part1/-part2` 视频 + 2 个 part pkl（完整非拆分版俱在）；10 号 `_WEIRD`、`_old` 两个 pkl（正常版+修正版俱在）；08-trove 的 5 个 `_reverted_edited_backup_*` 目录 17 个文件（主目录均有更新修正版）。
 
 ## 清理状态
 

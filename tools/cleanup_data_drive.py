@@ -41,6 +41,18 @@ REVIEW = [os.path.join("sliced_videos_and_csvs", "11_old"),
           os.path.join("sliced_videos_and_csvs", "12_old"),
           "CVCalibration2026",
           os.path.join("sliced_videos_and_csvs", "05", "05-star-002")]
+# glob patterns (files OR dirs) — confirmed-superseded remnants, 2026-08:
+#   03-travel part-split leftovers (complete non-part versions exist),
+#   10's _WEIRD/_old pkl snapshots (normal + _edited both exist),
+#   08-trove revert-backup dirs (all tags have newer _edited in main dir)
+REVIEW_GLOBS = [
+    os.path.join("sliced_videos_and_csvs", "03", "03-travel", "*_-part[12].mp4"),
+    os.path.join("mosh-results", "03", "*", "*_stageii_-part[12].pkl"),
+    os.path.join("mosh-results", "10-edited", "*", "*_WEIRD.pkl"),
+    os.path.join("mosh-results", "10-edited", "*", "*_stageii_old.pkl"),
+    os.path.join("mosh-results", "08-edited", "08-trove",
+                 "_reverted_edited_backup_*"),
+]
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--drive", default=DRIVE)
@@ -86,10 +98,14 @@ def main():
     print(f"\nphase 1 junk: {n_files} files + {n_dirs} dirs"
           f" ({n_bytes / 1e6:.1f} MB){' deleted' if a.run else ' would be deleted'}")
 
+    import glob as _glob
+    targets = [os.path.join(drive, rel) for rel in REVIEW]
+    for pat in REVIEW_GLOBS:
+        targets += sorted(_glob.glob(os.path.join(drive, pat)))
     moved = 0
-    for rel in REVIEW:
-        src = os.path.join(drive, rel)
-        if not os.path.exists(src):
+    for src in targets:
+        rel = os.path.relpath(src, drive)
+        if not os.path.exists(src) or os.path.basename(src).startswith("._"):
             continue
         dst = os.path.join(review_dst, rel.replace(os.sep, "__"))
         moved += 1
