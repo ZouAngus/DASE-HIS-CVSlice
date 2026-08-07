@@ -102,10 +102,15 @@ def main():
 
     # -- 4. retire C:\cv_data_2026 ------------------------------------------
     if os.path.isdir(a.cv2026):
-        note(f"[4] rename {a.cv2026} -> {a.cv2026}_TO_DELETE"
+        tgt = a.cv2026 + "_TO_DELETE"
+        n = 2
+        while os.path.exists(tgt):           # idempotent re-runs: unique name
+            tgt = a.cv2026 + f"_TO_DELETE_{n}"
+            n += 1
+        note(f"[4] rename {a.cv2026} -> {tgt}"
              " (E:\\Data_2026 is a verified superset; empty it manually)")
         if run:
-            os.rename(a.cv2026, a.cv2026 + "_TO_DELETE")
+            os.rename(a.cv2026, tgt)
     else:
         note(f"[4] {a.cv2026} not present — skip")
 

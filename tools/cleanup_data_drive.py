@@ -108,6 +108,10 @@ def main():
         if not os.path.exists(src) or os.path.basename(src).startswith("._"):
             continue
         dst = os.path.join(review_dst, rel.replace(os.sep, "__"))
+        n = 2
+        while os.path.exists(dst):           # idempotent re-runs: never clobber
+            dst = os.path.join(review_dst, rel.replace(os.sep, "__") + f"_{n}")
+            n += 1
         moved += 1
         if a.run:
             os.makedirs(review_dst, exist_ok=True)
