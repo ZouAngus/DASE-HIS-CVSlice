@@ -237,24 +237,35 @@ SMPL24_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12,
 SMPL24_HAND_CHAINS = ((22, 20, 18), (23, 21, 19))
 
 
-def rigid_extend_hands(P: np.ndarray,
-                       chains=SMPL24_HAND_CHAINS) -> tuple:
+def rigid_extend_hands(P: np.ndarray, chains=SMPL24_HAND_CHAINS,
+                       length: float | None = None) -> tuple:
     """Lock each hand joint onto the forearm line: a rigid, IK-consistent hand.
 
     MoSh hand tips are the least-observed joints and often fly around. For QC
     the hand's exact pose rarely matters, so we replace it with the stable
     prior: ``hand = wrist + unit(wrist - elbow) * L`` — collinear with the
-    forearm, pointing away from the body, at a constant length ``L`` (the
-    median finite hand-bone length; falls back to 40% of the median forearm
-    length if the hand data is unusable everywhere).
+    forearm, pointing away from the body, at a constant length ``L``.
+
+    ``L`` per chain:
+    * ``length`` given (> 0) — use it verbatim (manual override).
+    * auto — median hand-bone length over the SANE frames only: a hand cannot
+      be shorter than 10% or longer than 90% of the (median) forearm, so
+      frames outside that band are excluded BEFORE taking the median. This is
+      the crucial guard: the tool is used precisely when the hand flies in
+      many/most frames, and a plain all-frames median is then poisoned by the
+      flying values — every frame's hand would be extended by a huge "length"
+      (the reported "修完全部飞走"). If fewer than max(5, 10%) frames are sane,
+      fall back to 0.40 × median forearm (elbow/wrist are body joints, far
+      more reliable than the tip).
 
     Frames where the wrist/elbow are non-finite or coincide keep their original
-    hand value. Returns ``(out, n_changed)`` — a fixed copy and how many
-    (frame, hand) cells moved visibly (> ~0.1% of the forearm).
+    hand value. Returns ``(out, n_changed, used)`` — the fixed copy, how many
+    (frame, hand) cells moved visibly, and {hand_index: L} actually used.
     """
     P = np.asarray(P, float)
     out = P.copy()
     n_changed = 0
+    used: dict[int, float] = {}
     for hand, wrist, elbow in chains:
         if max(hand, wrist, elbow) >= P.shape[1]:
             continue
@@ -263,19 +274,28 @@ def rigid_extend_hands(P: np.ndarray,
         ok = np.isfinite(dn) & (dn > 1e-9) & np.isfinite(P[:, wrist]).all(axis=1)
         if not ok.any():
             continue
-        hb = np.linalg.norm(P[:, hand] - P[:, wrist], axis=1)
-        hb = hb[np.isfinite(hb)]
-        L = float(np.median(hb)) if hb.size else 0.4 * float(np.median(dn[ok]))
+        fore = float(np.median(dn[ok]))                  # robust forearm scale
+        if length is not None and length > 0:
+            L = float(length)
+        else:
+            hb = np.linalg.norm(P[:, hand] - P[:, wrist], axis=1)
+            hb = hb[np.isfinite(hb)]
+            sane = hb[(hb > 0.10 * fore) & (hb < 0.90 * fore)]
+            if sane.size >= max(5, 0.10 * hb.size):
+                L = float(np.median(sane))
+            else:
+                L = 0.40 * fore                          # tip data unusable
         if not np.isfinite(L) or L <= 0:
             continue
+        used[hand] = L
         new = P[:, wrist] + d / np.maximum(dn, 1e-12)[:, None] * L
         old = out[ok, hand]
         moved = ~np.isfinite(old).all(axis=1) | (
             np.linalg.norm(new[ok] - np.nan_to_num(old), axis=1)
-            > 1e-3 * float(np.median(dn[ok])))
+            > 1e-3 * fore)
         out[ok, hand] = new[ok]
         n_changed += int(moved.sum())
-    return out, n_changed
+    return out, n_changed, used
 
 
 def _subtrees(parents):

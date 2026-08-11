@@ -579,9 +579,20 @@ class SkeletonCorrector(QMainWindow):
         bl_btn.setToolTip(tr('以全段中位骨长为基准,保持关节朝向、把每根骨头拉回该长度(连同其下游一起移动)。专治漂浮关节拉长骨头。强度1=精确,小一点更温和。仅 SMPL-24;有≥2关键帧则只作用其区间。'))
         bl_btn.clicked.connect(self._apply_bone_constraint)
         blf.addRow(bl_btn)
+        self.hand_len_spin = QDoubleSpinBox()
+        self.hand_len_spin.setRange(0.0, 0.60)
+        self.hand_len_spin.setDecimals(3)
+        self.hand_len_spin.setSingleStep(0.005)
+        self.hand_len_spin.setValue(0.0)
+        self.hand_len_spin.setToolTip(
+            tr('修复手部使用的手骨长(手腕→手,单位与骨架一致,通常为米)。\n'
+               '0 = 自动:只在『手长处于小臂 10%~90%』的正常帧上取中位数,'
+               '飞掉的帧不参与;几乎全坏时用 0.40×小臂长。\n'
+               '自动结果不合适就在这里手动填(修复完成弹窗会显示自动值)。'))
+        blf.addRow(tr('手长 (0=自动):'), self.hand_len_spin)
         hands_btn = QPushButton(tr('🖐 一键修复手部 (与小臂共线)'))
         hands_btn.setToolTip(
-            tr('把左右手(22/23)固定成小臂的刚性延长:手 = 手腕 + 小臂方向 × 恒定手长(全段中位手骨长)。整段一次修好,不用一帧帧拖乱飞的手。\n注意:修好后如果又插值/平滑改动了手肘或手腕,再点一次即可重新对齐。可 Ctrl+Z 撤销。'))
+            tr('把左右手(22/23)固定成小臂的刚性延长:手 = 手腕 + 小臂方向 × 恒定手长。整段一次修好,不用一帧帧拖乱飞的手。\n手长默认自动(抗飞帧污染,见「手长」提示),也可在上方手动指定。\n注意:修好后如果又插值/平滑改动了手肘或手腕,再点一次即可重新对齐。可 Ctrl+Z 撤销。'))
         hands_btn.clicked.connect(self._fix_hands)
         blf.addRow(hands_btn)
         rp.addWidget(bl_g)
@@ -3668,20 +3679,26 @@ class SkeletonCorrector(QMainWindow):
             tr('已对 skel[{}..{}] 按中位骨长(强度 {:g})约束。\n保持了关节朝向,只改骨长;不满意可撤销。').format(fa, fb, strength))
 
     def _fix_hands(self) -> None:
-        """One-click rigid hands: lock L/R hand (22/23) onto the forearm line at
-        a constant (median) hand length, over the whole clip. Undoable."""
+        """One-click rigid hands: lock L/R hand (22/23) onto the forearm line
+        at a constant hand length (auto-robust or the manual 手长 spin value),
+        over the whole clip. Undoable."""
         if self.pts3d is None:
             return
         if self.pts3d.shape[1] != 24:
             QMessageBox.information(self, tr('修复手部'),
                                     tr('当前骨架不是 SMPL-24,暂不支持。'))
             return
+        manual = float(self.hand_len_spin.value())
         self._push_undo()
-        self.pts3d, n = rigid_extend_hands(self.pts3d)
+        self.pts3d, n, used = rigid_extend_hands(
+            self.pts3d, length=manual if manual > 0 else None)
         self._show_frame()
+        l_txt = "  ".join(
+            ("L" if j == 22 else "R") + f"={used[j]:.3f}" for j in sorted(used))
+        mode = (tr('手动手长') if manual > 0 else tr('自动手长(抗飞帧)'))
         QMessageBox.information(
             self, tr('修复手部完成'),
-            tr('已把左右手固定为小臂的刚性延长(共线、恒定手长),整段共调整 {} 处。\n之后若再插值/平滑改动了手肘或手腕,重按一次即可重新对齐;可 Ctrl+Z 撤销。').format(n))
+            tr('已把左右手固定为小臂的刚性延长(共线、恒定手长),整段共调整 {} 处。\n使用{}: {}\n不合适可在「手长」里手动指定后重按(0=自动);可 Ctrl+Z 撤销。\n之后若再插值/平滑改动了手肘或手腕,重按一次即可重新对齐。').format(n, mode, l_txt))
 
     def _seed_keyframe(self, pidx: int) -> bool:
         """Pre-fill frame *pidx* with the value interpolated from existing

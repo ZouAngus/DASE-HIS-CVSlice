@@ -236,13 +236,33 @@ EN: dict[str, str] = {
         "stretch bones. Strength 1 = exact, lower = gentler. SMPL-24 only; "
         "with ≥2 keyframes, only their span.",
     "🖐 一键修复手部 (与小臂共线)": "🖐 One-click hand fix (collinear with forearm)",
-    "把左右手(22/23)固定成小臂的刚性延长:手 = 手腕 + 小臂方向 × 恒定手长(全段中位手骨长)。整段一次修好,不用一帧帧拖乱飞的手。\n"
-    "注意:修好后如果又插值/平滑改动了手肘或手腕,再点一次即可重新对齐。可 Ctrl+Z 撤销。":
+    "把左右手(22/23)固定成小臂的刚性延长:手 = 手腕 + 小臂方向 × 恒定手长。整段一次修好,不用一帧帧拖乱飞的手。\n手长默认自动(抗飞帧污染,见「手长」提示),也可在上方手动指定。\n注意:修好后如果又插值/平滑改动了手肘或手腕,再点一次即可重新对齐。可 Ctrl+Z 撤销。":
         "Lock both hands (22/23) as rigid forearm extensions: hand = wrist + "
-        "forearm direction × constant hand length (whole-clip median). Fixes "
-        "the whole clip in one click — no more dragging flying hands frame by "
-        "frame.\nNote: if interpolation/smoothing later moves the elbows or "
-        "wrists, click again to re-align. Undoable (Ctrl+Z).",
+        "forearm direction × constant hand length. Fixes the whole clip in "
+        "one click — no more dragging flying hands frame by frame.\nThe "
+        "length is auto by default (robust against flying frames, see the "
+        "Hand-length tooltip) or set it manually above.\nNote: if "
+        "interpolation/smoothing later moves the elbows or wrists, click "
+        "again to re-align. Undoable (Ctrl+Z).",
+    "手长 (0=自动):": "Hand length (0=auto):",
+    "修复手部使用的手骨长(手腕→手,单位与骨架一致,通常为米)。\n"
+    "0 = 自动:只在『手长处于小臂 10%~90%』的正常帧上取中位数,"
+    "飞掉的帧不参与;几乎全坏时用 0.40×小臂长。\n"
+    "自动结果不合适就在这里手动填(修复完成弹窗会显示自动值)。":
+        "Hand-bone length used by the hand fix (wrist→hand, same units as "
+        "the skeleton, usually meters).\n0 = auto: median over frames whose "
+        "hand length is within 10%–90% of the forearm — flying frames are "
+        "excluded; if almost all frames are bad, 0.40 × forearm is used.\n"
+        "If the auto value is off, type one here (the done dialog shows the "
+        "auto value).",
+    "手动手长": "manual hand length",
+    "自动手长(抗飞帧)": "auto hand length (fly-frame robust)",
+    "已把左右手固定为小臂的刚性延长(共线、恒定手长),整段共调整 {} 处。\n使用{}: {}\n不合适可在「手长」里手动指定后重按(0=自动);可 Ctrl+Z 撤销。\n之后若再插值/平滑改动了手肘或手腕,重按一次即可重新对齐。":
+        "Both hands locked as rigid forearm extensions (collinear, constant "
+        "length); {} cells adjusted across the clip.\nUsing {}: {}\nIf it "
+        "looks off, set Hand length manually and press again (0 = auto); "
+        "Ctrl+Z undoes.\nIf interpolation/smoothing later moves the elbows "
+        "or wrists, press again to re-align.",
     "撤销": "Undo",
     "撤销 (Ctrl+Z)": "Undo (Ctrl+Z)",
     "撤销步数: 0": "Undo steps: 0",
@@ -569,11 +589,6 @@ EN: dict[str, str] = {
     "修复手部": "Hand fix",
     "当前骨架不是 SMPL-24,暂不支持。": "This skeleton is not SMPL-24 — unsupported.",
     "修复手部完成": "Hand fix done",
-    "已把左右手固定为小臂的刚性延长(共线、恒定手长),整段共调整 {} 处。\n之后若再插值/平滑改动了手肘或手腕,重按一次即可重新对齐;可 Ctrl+Z 撤销。":
-        "Both hands locked as rigid forearm extensions (collinear, constant "
-        "length); {} cells adjusted across the clip.\nIf interpolation/"
-        "smoothing later moves the elbows or wrists, press again to re-align; "
-        "Ctrl+Z undoes.",
     "没有关键帧可清空。": "No keyframes to clear.",
     "确认": "Confirm",
     "清空全部 {} 个关键帧(及其逐关节标记)?\n不影响已调整的骨架姿态,只是清掉关键帧,之后可重新标。":
