@@ -90,6 +90,10 @@ E→C 汇总执行完毕并逐演员验证：11 人处理数据（10 人汇入 +
 
 组内已确认可清理的残留（`cleanup_data_drive.py` 移入 `_review_before_delete`）：03-travel 的 14 个 `-part1/-part2` 视频 + 2 个 part pkl（完整非拆分版俱在）；10 号 `_WEIRD`、`_old` 两个 pkl（正常版+修正版俱在）；08-trove 的 5 个 `_reverted_edited_backup_*` 目录 17 个文件（主目录均有更新修正版）。
 
+## 标定统一（2026-08-08）
+
+diagonal 相机标定已全库统一为 6 月修正版（源：`15_export_37\15-boss\calibration\cali4_diagonal_*`）。`tools\replace_diagonal_calibration.py` 对 83 个导出标定目录执行：134 个文件内容替换（保留各目录原前缀 cali2/3/4 命名）、48 个本已一致、11 个 blank 占位不动；原文件备份于 `_to_delete\diagonal_cal_backup\`（53 个场景目录）。复跑验证 0 剩余，幂等。
+
 ## 清理状态
 
 | 事项 | 状态 |
