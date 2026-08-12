@@ -44,7 +44,7 @@ A → B 的路径 = align 对齐 + 人工修正；B 之后无人工环节。
 | 07 | 297 | 完整无问题 |
 | 11 | 266 | 补丁自动优先；11/12 有 30hz 版（pkls/ 子目录，此前漏扫已纠正）；**11-travel-02 的 12 个动作有切片无 mosh**——切片已确认完整（12 csv×7 视角+check+标定+offsets 全齐：grab_box×6、measure_length×3、throwing_net×3），原始动捕 `Data_2026\\csv_data\\Travel_11_002.csv`（678MB）在，**待重跑 mosh**（流程同 13 号的服务器工作区）|
 | 12 | 302 | 前置：`12_changed_csv` 补丁（同上）|
-| 13 | 254 | 已对齐+自验证；elsdon 37 动作缺视频；15 个视角小残差待微调 |
+| 13 | 291 | 已对齐+自验证；~~elsdon 缺视频~~ **已修复**（2026-08-12，见问题2）；15 个视角小残差待微调 |
 
 ## 已放弃（2026-08 决议）
 
@@ -64,7 +64,7 @@ A → B 的路径 = align 对齐 + 人工修正；B 之后无人工环节。
 ## 问题清单
 
 1. **08-star**：已确认为同事拷贝失误——切片目录被误拷成骨骼目录（54 个 pkl）。等同事补拷 star 场景切片视频（预计 ~50 csv + ~370 mp4 + calibration）。汇总脚本已自动跳过错放的 pkl。
-2. **13 号**：~~boss shooting-rep1 缺 6 视角~~ **已补齐（2026-08-08）**：从原始录像 `1.15_13` 以现有 topleft 切片作序列锚定（帧 41551，窗口 1210 帧）重新裁出 6 路，已放入 `13_export_aligned\13-boss`，修正器中微调各视角 offset 即可。**重要发现（修订版，以此为准）：原始录像的三台顶部相机是镜像录制的**（Angus 确认，`tools/flip_video.py` 即为此而生），且 `1.15_13` 的 topleft/topcenter 文件名互换。正确关系：切片 topleft=原始 topcenter **翻转**（seq-corr 0.852）、topcenter=原始 topleft 翻转、topright=原始 topright 翻转；bottom×3/diagonal 同名不翻。真锚点=原始帧 41727。**教训：凡用原始素材裁切，顶部三台必须先翻转再匹配**（未翻转匹配会推出错误映射——本次第一版就错了，已作废重裁）。1.7_03 的"标签互换"也应按镜像+换名重新审视；`13-elsdon` 仅 2 个动作有视频，需整场重导；15 个对齐残差视角清单见附录（travel 占 12，长片段片内漂移）。
+2. **13 号**：~~boss shooting-rep1 缺 6 视角~~ **已补齐（2026-08-08）**：从原始录像 `1.15_13` 以现有 topleft 切片作序列锚定（帧 41551，窗口 1210 帧）重新裁出 6 路，已放入 `13_export_aligned\13-boss`，修正器中微调各视角 offset 即可。**重要发现（修订版，以此为准）：原始录像的三台顶部相机是镜像录制的**（Angus 确认，`tools/flip_video.py` 即为此而生），且 `1.15_13` 的 topleft/topcenter 文件名互换。正确关系：切片 topleft=原始 topcenter **翻转**（seq-corr 0.852）、topcenter=原始 topleft 翻转、topright=原始 topright 翻转；bottom×3/diagonal 同名不翻。真锚点=原始帧 41727。**教训：凡用原始素材裁切，顶部三台必须先翻转再匹配**（未翻转匹配会推出错误映射——本次第一版就错了，已作废重裁）。1.7_03 的"标签互换"也应按镜像+换名重新审视；~~13-elsdon 需重导~~ **已修复（2026-08-12）**：第一轮 offsets.json 完整保留 39 条裁切记录，据此从原始 sword_13 录像（sword=elsdon）重裁 259 段，现 273/273 齐全、帧数逐段核对无误、机位映射经现存切片 corr=1.00 实证（同 boss：topleft↔topcenter 互换+三顶翻转）。**待办：13-elsdon 补跑 align**（无 check 片则 leads 按 0）；15 个对齐残差视角清单见附录（travel 占 12，长片段片内漂移）。
 3. **03 号重复目录**：切片 `03-003-boss`（24 动作，文件名就是 03-boss-*）与 `03-boss`（44 动作）、mosh `03-2-boss-moshed`（24）与 `03-boss-moshed`（44）——疑似两次会话拆分。汇总脚本合并进 03-boss，同名不同大小的会记入冲突单待裁决。
 4. **10 号杂物**：168 个 `.mp4.bak`（脚本已过滤）；mosh 目录名混乱（大写 Boss、结尾连字符）；两个可疑 pkl（`_WEIRD`、`_old` 后缀）修正时留意；10-elsdon shooting-rep2 缺 7 个 check 片。
 5. **03/08/10 均无 30hz、均未 align**：修正开始前逐人跑 align（对齐脚本模板 = `tools/align_13.bat` 改路径）。
@@ -108,7 +108,7 @@ diagonal 相机标定已全库统一为 6 月修正版（源：`15_export_37\15-
 1. 删 `_to_delete`；跑 E 盘清理；`consolidate_to_c.py` 干跑→`--run`（03/08/10 已含，约 240GB）；`git push`。
 2. 15 号 build --run 出第一份数据集；08/10 修正收尾（08 补 star）后紧随其后。
 3. 未修正的 A 类逐人 align → 分配修正。
-4. 补料：14 补 MoSh、08-star 重导、13-elsdon 重导、09 走流程。
+4. 补料：08-star 等同事补拷、13-elsdon 跑 align、11-travel-02 服务器补 mosh、09 走流程。
 
 ## 附录：13 号对齐残差 15 视角
 
