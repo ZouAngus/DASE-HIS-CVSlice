@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 
 _PATH = os.path.join(os.path.expanduser("~"), ".cvslice_config.json")
 
@@ -35,23 +36,34 @@ def get_str(key: str, default: str = "") -> str:
 
 def set_str(key: str, value: str) -> None:
     """Persist a plain string setting."""
+    set_value(key, value)
+
+
+def get_value(key: str, default=None):
+    """Read a JSON setting (e.g. a group of UI preferences)."""
+    return _load().get(key, default)
+
+
+def set_value(key: str, value) -> None:
+    """Replace the config atomically so interrupted writes keep the old file."""
+    tmp = None
     try:
         cfg = _load()
         cfg[key] = value
-        with open(_PATH, "w", encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=os.path.dirname(_PATH), delete=False) as f:
+            tmp = f.name
             json.dump(cfg, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, _PATH)
     except Exception:
         pass
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def set_dir(key: str, path: str) -> None:
     """Persist *path* as the last directory for *key*."""
     if not path:
         return
-    try:
-        cfg = _load()
-        cfg[key] = path
-        with open(_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
+    set_value(key, path)

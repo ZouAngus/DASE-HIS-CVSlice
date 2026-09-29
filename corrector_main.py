@@ -47,6 +47,12 @@ def main():
             break
     app.setFont(QFont(chosen, 9))
 
+    # Explicit CI-only check: it isolates configuration and synthetic data.
+    if len(sys.argv) == 3 and sys.argv[1] == "--smoke-test":
+        from cvslice.packaging_smoke import run
+        run(app, sys.argv[2])
+        return
+
     from cvslice.ui.skeleton_corrector import SkeletonCorrector
     folder = sys.argv[1] if len(sys.argv) > 1 else None
     win = SkeletonCorrector(folder)

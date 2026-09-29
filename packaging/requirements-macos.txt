@@ -1,0 +1,13 @@
+# Python 3.12, Apple Silicon. Install rtmlib separately with --no-deps:
+# its metadata otherwise installs TWO conflicting OpenCV distributions.
+numpy==2.2.6
+pandas==2.2.3
+scipy==1.15.3
+opencv-contrib-python==4.11.0.86
+PyQt5==5.15.11
+PyQt5-Qt5==5.15.18
+openpyxl==3.1.5
+onnxruntime==1.20.1
+tqdm==4.67.1
+pyinstaller==6.22.3
+pytest==8.3.5

@@ -476,6 +476,26 @@ def _interp_axis(target, knot_f, knot_v, method):
     return np.interp(target, knot_f, knot_v)
 
 
+def _smooth_between_pins(vals, target, pins, values, sigma, *, bounded=False):
+    """Smooth generated samples without moving any authored anchor.
+
+    Correct the filtered curve continuously through all pin residuals, rather
+    than snapping isolated samples back (which introduces one-frame spikes).
+    In replace mode also keep each segment inside its endpoint coordinate range.
+    """
+    if sigma > 0:
+        vals = _gaussian_smooth(vals, sigma)
+        indices = np.asarray(pins, int) - int(target[0])
+        vals += np.interp(target, pins, values - vals[indices])
+        if bounded:
+            for i in range(len(pins) - 1):
+                a, b = indices[i], indices[i + 1]
+                vals[a:b + 1] = np.clip(vals[a:b + 1],
+                                       min(values[i:i + 2]), max(values[i:i + 2]))
+    vals[np.asarray(pins, int) - int(target[0])] = values
+    return vals
+
+
 def interpolate_offsets_all_joints(pts_edited: np.ndarray,
                                    pts_orig: np.ndarray,
                                    frame_a: int, frame_b: int,
@@ -868,8 +888,8 @@ def interpolate_per_joint(pts_edited: np.ndarray, pts_orig: np.ndarray,
             kv = np.array([pts_edited[p, j] for p in pins])
             for d in range(3):
                 vals = _interp_axis(target, knots, kv[:, d], method)
-                if eff > 0:
-                    vals = _gaussian_smooth(vals, eff)
+                vals = _smooth_between_pins(vals, target, knots, kv[:, d], eff,
+                                            bounded=True)
                 out[fa:fb + 1, j, d] = vals
             continue
 
@@ -899,8 +919,8 @@ def interpolate_per_joint(pts_edited: np.ndarray, pts_orig: np.ndarray,
             kv = np.array([pts_edited[p, j] for p in pins])
             for d in range(3):
                 vals = _interp_axis(target, knots, kv[:, d], method)
-                if eff > 0:
-                    vals = _gaussian_smooth(vals, eff)
+                vals = _smooth_between_pins(vals, target, knots, kv[:, d], eff,
+                                            bounded=True)
                 out[fa:fb + 1, j, d] = vals
         else:
             # Offset mode: ride the (repaired) smooth source + a small smooth
@@ -909,9 +929,9 @@ def interpolate_per_joint(pts_edited: np.ndarray, pts_orig: np.ndarray,
             delta = np.array([pts_edited[p, j] - winb[p - fa] for p in pins])
             for d in range(3):
                 di = _interp_axis(target, knots, delta[:, d], method)
-                if eff > 0:
-                    di = _gaussian_smooth(di, eff)
+                di = _smooth_between_pins(di, target, knots, delta[:, d], eff)
                 out[fa:fb + 1, j, d] = winb[:, d] + di
+        out[pins, j] = pts_edited[pins, j]
     return out, repaired_joints, n_repaired, max_sigma
 
 
@@ -953,4 +973,3 @@ def apply_bulk_offset_all_joints(pts3d: np.ndarray,
 
     # weights: (N,) -> (N, 1, 1), deltas: (J, 3) -> (1, J, 3)
     return original + deltas[None, :, :] * weights[:, None, None]
-

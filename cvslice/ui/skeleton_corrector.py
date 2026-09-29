@@ -38,6 +38,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
     QProgressDialog, QPushButton, QScrollArea, QSlider, QSpinBox, QSplitter,
+    QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -59,9 +60,8 @@ from cvslice.vision.projection import (
     clear_projection_cache, draw_skel_with_confidence, project_pts,
 )
 from cvslice.vision.propagation import (
-    SMPL24_PARENTS, enforce_bone_lengths, interpolate_all_joints,
+    SMPL24_PARENTS, interpolate_all_joints,
     interpolate_per_joint, rigid_extend_hands,
-    reference_bone_lengths, smooth_post_process,
 )
 
 
@@ -206,6 +206,7 @@ class SkeletonCorrector(QMainWindow):
         self.undo_stack: list = []
 
         self._build_ui()
+        self._restore_ui_settings()
 
         # Route nav/playback keys at the application level so they keep working
         # after the mouse focus lands on the video label or a button (e.g. the
@@ -237,6 +238,58 @@ class SkeletonCorrector(QMainWindow):
     def pfps(self) -> float:
         return self.timeline.pfps
 
+    # Stable attribute names, independent of UI language/list order.
+    _UI_CHECKS = ("mode_all", "two_view_cb", "ik_cb", "seed_kf_cb",
+                  "onion_cb", "replace_mode_cb")
+
+    def _restore_ui_settings(self) -> None:
+        cfg = appconfig.get_value("corrector_ui", {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        for name in self._UI_CHECKS:
+            widget = getattr(self, name)
+            if isinstance(cfg.get(name), bool):
+                widget.blockSignals(True)
+                widget.setChecked(cfg[name])
+                widget.blockSignals(False)
+            widget.toggled.connect(lambda _on: self._save_ui_settings())
+        value = cfg.get("kf_smooth")
+        if isinstance(value, (int, float)) and np.isfinite(value):
+            self.kf_smooth.setValue(value)
+        if cfg.get("kf_method") in ("spline", "linear"):
+            self.kf_method.setCurrentText(cfg["kf_method"])
+        length = cfg.get("hand_length", 0.0)
+        self._hand_length = (float(length) if isinstance(length, (int, float))
+                             and 0 <= length <= 0.6 else 0.0)
+        self.hand_len_spin.setValue(self._hand_length)
+        self.hand_len_spin.valueChanged.connect(lambda _v: self._save_ui_settings())
+        self.kf_smooth.valueChanged.connect(lambda _v: self._save_ui_settings())
+        self.kf_method.currentTextChanged.connect(lambda _v: self._save_ui_settings())
+
+    def _save_ui_settings(self) -> None:
+        cfg = {name: getattr(self, name).isChecked() for name in self._UI_CHECKS}
+        cfg.update(kf_smooth=self.kf_smooth.value(),
+                   kf_method=self.kf_method.currentText(),
+                   hand_length=self.hand_len_spin.value())
+        appconfig.set_value("corrector_ui", cfg)
+
+    @staticmethod
+    def _folder_key(path: str) -> str:
+        return os.path.normcase(os.path.abspath(path))
+
+    def _remember_location(self) -> None:
+        if not self.folder or not (0 <= self._cur_action_idx < len(self._actions)):
+            return
+        cfg = appconfig.get_value("corrector_location", {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+        scenes = cfg.get("scenes", {})
+        if not isinstance(scenes, dict):
+            scenes = {}
+        scenes[self._folder_key(self.folder)] = self._actions[self._cur_action_idx]["tag"]
+        appconfig.set_value("corrector_location", {"scene": self._folder_key(self.folder),
+                                                   "scenes": scenes})
+
     @property
     def _skel_offset(self) -> int:
         return self.timeline.skel_offset
@@ -264,18 +317,10 @@ class SkeletonCorrector(QMainWindow):
         a_mosh.triggered.connect(lambda: self._choose_mosh_dir())
         fm.addAction(a_mosh)
         fm.addSeparator()
-        a_save = QAction(tr('保存编辑结果 (PKL/CSV)'), self)
-        a_save.setShortcut(QKeySequence("Ctrl+S"))
-        a_save.triggered.connect(self._save)
-        fm.addAction(a_save)
         a_save_all = QAction(tr('保存全部已编辑动作'), self)
-        a_save_all.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        a_save_all.setShortcuts([QKeySequence("Ctrl+S"), QKeySequence("Ctrl+Shift+A")])
         a_save_all.triggered.connect(self._save_all)
         fm.addAction(a_save_all)
-        a_save_prog = QAction(tr('保存进度 (JSON)'), self)
-        a_save_prog.setShortcut(QKeySequence("Ctrl+Shift+S"))
-        a_save_prog.triggered.connect(self._save_progress)
-        fm.addAction(a_save_prog)
         fm.addSeparator()
         a_exit = QAction(tr('退出'), self)
         a_exit.setShortcut(QKeySequence("Ctrl+Q"))
@@ -433,6 +478,7 @@ class SkeletonCorrector(QMainWindow):
         ej_g.setToolTip(tr('视图中关节号配色:绿=≥2关键帧(会插值) 橙=仅1帧(不插,需再加) 灰=未编辑;品红点=本帧标注'))
         ejl = QVBoxLayout(ej_g)
         ej_legend = QLabel(tr('绿≥2帧 橙=1 灰=无 | 品红点=本帧'))
+        ej_legend.setWordWrap(True)
         ej_legend.setStyleSheet("color:#888; font-size:11px;")
         ejl.addWidget(ej_legend)
         self.edited_list = QListWidget()
@@ -450,9 +496,23 @@ class SkeletonCorrector(QMainWindow):
         all_btn = QPushButton(tr('本帧全选关节'))
         all_btn.setToolTip(tr('把当前帧所有有效关节按当前姿态锚定为关键帧(已全锚定则全部取消)。可 Ctrl+Z 撤销。'))
         all_btn.clicked.connect(self._anchor_all_here)
-        ej_btn_row.addWidget(all_btn)
         ejl.addLayout(ej_btn_row)
+        ejl.addWidget(all_btn)
         rp.addWidget(ej_g)
+
+        hands_g = QGroupBox(tr('手部共线修复'))
+        hands_layout = QFormLayout(hands_g)
+        self.hand_len_spin = QDoubleSpinBox()
+        self.hand_len_spin.setRange(0.0, 0.60)
+        self.hand_len_spin.setDecimals(3)
+        self.hand_len_spin.setSingleStep(0.005)
+        self.hand_len_spin.setToolTip(tr('0=自动估计手长;非零值使用骨架的长度单位(通常为米)。'))
+        hands_layout.addRow(tr('手长 (0=自动):'), self.hand_len_spin)
+        hands_btn = QPushButton(tr('一键修复手部'))
+        hands_btn.setToolTip(tr('将左右手固定成小臂的共线延长,整段生效。可撤销。'))
+        hands_btn.clicked.connect(self._fix_hands)
+        hands_layout.addRow(hands_btn)
+        rp.addWidget(hands_g)
 
         # Keyframe group: mark corrected frames, interpolate all joints between
         kf_g = QGroupBox(tr('关键帧 (Keyframe)'))
@@ -474,31 +534,31 @@ class SkeletonCorrector(QMainWindow):
         # Seed the current frame from a known-good earlier pose when the current
         # one is wrecked, then fine-tune.
         copy_row = QHBoxLayout()
-        cp_f_btn = QPushButton(tr('⤵ 复制上一帧 (F)'))
+        cp_f_btn = QPushButton(tr('上一帧 (F)'))
         cp_f_btn.setToolTip(tr('把上一视频帧的骨骼复制到当前帧并设为关键帧,再微调。当前帧整骨架崩了、但前一帧正常时,一键拿到好起点。'))
         cp_f_btn.clicked.connect(lambda: self._copy_pose("frame"))
         copy_row.addWidget(cp_f_btn)
-        cp_k_btn = QPushButton(tr('⤵ 复制上一关键帧 (G)'))
+        cp_k_btn = QPushButton(tr('上一关键帧 (G)'))
         cp_k_btn.setToolTip(tr('把上一个关键帧(已确认的好姿态)复制到当前帧并设为关键帧,再微调。前一帧也坏、但更早有好关键帧时用。'))
         cp_k_btn.clicked.connect(lambda: self._copy_pose("kf"))
         copy_row.addWidget(cp_k_btn)
         kfl.addLayout(copy_row)
         clip_row = QHBoxLayout()
-        cpp_btn = QPushButton(tr('📋 复制本帧姿态'))
+        cpp_btn = QPushButton(tr('复制姿态'))
         cpp_btn.setToolTip(tr('把当前帧整副骨架存入剪贴板,可粘贴到任意帧(如帧1→帧6)。'))
         cpp_btn.clicked.connect(self._copy_current_pose)
         clip_row.addWidget(cpp_btn)
-        psp_btn = QPushButton(tr('📥 粘贴姿态到本帧'))
+        psp_btn = QPushButton(tr('粘贴姿态'))
         psp_btn.setToolTip(tr('把剪贴板里的整副姿态粘到当前帧并锚定为关键帧。可 Ctrl+Z 撤销。'))
         psp_btn.clicked.connect(self._paste_pose)
         clip_row.addWidget(psp_btn)
         kfl.addLayout(clip_row)
         jclip_row = QHBoxLayout()
-        cpj_btn = QPushButton(tr('📋 复制选中关节 (本帧)'))
-        cpj_btn.setToolTip(tr('只复制当前选中(已编辑)关节在本帧的位置。'))
+        cpj_btn = QPushButton(tr('复制关节 (本帧)'))
+        cpj_btn.setToolTip(tr('本帧有已标关节时只复制这些关节;本帧没有标记时,复制整个动作的已编辑关节。'))
         cpj_btn.clicked.connect(self._copy_joints)
         jclip_row.addWidget(cpj_btn)
-        psj_btn = QPushButton(tr('📥 粘贴关节到本帧'))
+        psj_btn = QPushButton(tr('粘贴关节'))
         psj_btn.setToolTip(tr('把复制的关节位置粘到当前帧的同名关节上,其余关节不动;粘贴的关节锚定为关键帧。可 Ctrl+Z 撤销。'))
         psj_btn.clicked.connect(self._paste_joints)
         jclip_row.addWidget(psj_btn)
@@ -529,73 +589,29 @@ class SkeletonCorrector(QMainWindow):
         self.kf_smooth.setSingleStep(0.5)
         self.kf_smooth.setValue(0.0)
         self.kf_smooth.setToolTip(
-            tr('软关键帧平滑(σ,帧)。默认 0 = 自动:按关键帧间距自动软化,把手标关键帧的微小不一致(=抖动来源)平均掉,曲线落在关键帧附近而非硬穿过。>0 = 在自动基础上再加强;想更贴合手标位置就调小/设很小的值。'))
+            tr('只平滑关键帧之间的生成轨迹,人工 pin 保持原位。0=关闭平滑。'))
         smooth_row.addWidget(self.kf_smooth, 1)
         kfl.addLayout(smooth_row)
-        self.replace_mode_cb = QCheckBox(tr('关键帧间走直线 (replace,丢弃原始运动)'))
+        self.replace_mode_cb = QCheckBox(tr('替换中间原始轨迹'))
         self.replace_mode_cb.setChecked(False)   # default = offset (keeps motion)
         self.replace_mode_cb.setToolTip(
             tr('默认(不勾)= offset: 骨架继续跟随原始身体运动(下蹲/跳/走都保留),只把你在关键帧上的修正量平滑地叠加上去。适合绝大多数情况,只要少数几个关键帧。(实测下蹲:offset 贴合真实运动 ~2-4% 骨长。)\n勾上 = replace: 关键帧之间画直线穿过你的关键帧姿态,丢弃中间原始运动。只在『某段源数据是坏的、且你把这段的极值都标了关键帧』时用;它会把你没标关键帧的运动压平(比如下蹲会被拉成站着不动,中间帧严重错位)。'))
         kfl.addWidget(self.replace_mode_cb)
-        interp_btn = QPushButton(tr('在关键帧间插值 (全关节)'))
+        interp_btn = QPushButton(tr('关键帧插值'))
+        interp_btn.setStyleSheet("font-weight:bold; padding:6px;")
         interp_btn.setToolTip(
-            tr('先在若干帧上修好骨架并各加一个关键帧,再插值。编辑过的关节用关键帧重画(去漂浮);**你没拖、但中间帧坏掉的关节(骨长突变/瞬间弹跳)会被自动检出并就地修复**,所以点一次基本就修好,不用回头反复检查。其余正常关节保留平滑原始运动。关键帧不一致/抖动时调大「软平滑」。'))
+            tr('每个关节至少两个 pin 才会插值。人工 pin、未编辑关节和区间外的帧保持不变。完成后请播放检查。'))
         interp_btn.clicked.connect(self._interp_keyframes)
         kfl.addWidget(interp_btn)
-        cam_fill_btn = QPushButton(tr('🎥 相机引导填充中间帧'))
-        cam_fill_btn.setStyleSheet("font-weight:bold;")
+        cam_fill_btn = QToolButton()
+        cam_fill_btn.setText(tr('相机引导填充'))
+        cam_fill_btn.setAutoRaise(True)
+        cam_fill_btn.setStyleSheet("font-size:11px; padding:2px;")
         cam_fill_btn.setToolTip(
-            tr('用多视角相机修正关键帧之间的骨架,再锚定到你的关键帧(关键帧纹丝不动)。相机可靠的是画面内(横向)位置——用它纠正源骨架的横向漂移;深度方向相机不可靠(易抖/外扩),故深度保持源骨架不变,避免肢体外翻。相机看不清的关节/帧回退到原始,不会更差。边界速度匹配缓入,与前后丝滑衔接。需要 2D 姿态模型。'))
+            tr('可选的模型辅助填充,需要 2D 姿态模型,可能较慢。遮挡和标定误差会影响结果,请检查,不满意可撤销。'))
         cam_fill_btn.clicked.connect(self._camera_guided_fill)
-        kfl.addWidget(cam_fill_btn)
+        kfl.addWidget(cam_fill_btn, 0, Qt.AlignRight)
         rp.addWidget(kf_g)
-
-        sm_g = QGroupBox(tr('标注后平滑处理'))
-        sf = QFormLayout(sm_g)
-        self.post_strength = QDoubleSpinBox()
-        self.post_strength.setRange(0.2, 5.0)
-        self.post_strength.setSingleStep(0.2)
-        self.post_strength.setValue(1.0)
-        self.post_strength.setToolTip(tr('越大越平滑(慢处);快速动作始终保留'))
-        sf.addRow(tr('平滑强度:'), self.post_strength)
-        self.post_despike = QCheckBox(tr('去单帧尖刺(中值)'))
-        self.post_despike.setChecked(True)
-        sf.addRow(self.post_despike)
-        sm_btn = QPushButton(tr('🩹 一键平滑后处理 (已编辑关节)'))
-        sm_btn.setStyleSheet("font-weight:bold;")
-        sm_btn.setToolTip(tr('中值去单帧尖刺 + One-Euro 速度自适应平滑。慢处抖动被压平,快速动作不糊(按速度自动放行)。仅作用已编辑关节;有≥2关键帧则只作用其区间。'))
-        sm_btn.clicked.connect(self._apply_post_smooth)
-        sf.addRow(sm_btn)
-        rp.addWidget(sm_g)
-
-        bl_g = QGroupBox(tr('骨长约束 (Bone length)'))
-        blf = QFormLayout(bl_g)
-        self.bone_strength = QDoubleSpinBox()
-        self.bone_strength.setRange(0.0, 1.0)
-        self.bone_strength.setSingleStep(0.1)
-        self.bone_strength.setValue(1.0)
-        blf.addRow(tr('强度 (0~1):'), self.bone_strength)
-        bl_btn = QPushButton(tr('🦴 约束骨长 (整段)'))
-        bl_btn.setToolTip(tr('以全段中位骨长为基准,保持关节朝向、把每根骨头拉回该长度(连同其下游一起移动)。专治漂浮关节拉长骨头。强度1=精确,小一点更温和。仅 SMPL-24;有≥2关键帧则只作用其区间。'))
-        bl_btn.clicked.connect(self._apply_bone_constraint)
-        blf.addRow(bl_btn)
-        self.hand_len_spin = QDoubleSpinBox()
-        self.hand_len_spin.setRange(0.0, 0.60)
-        self.hand_len_spin.setDecimals(3)
-        self.hand_len_spin.setSingleStep(0.005)
-        self.hand_len_spin.setValue(0.0)
-        self.hand_len_spin.setToolTip(
-            tr('修复手部使用的手骨长(手腕→手,单位与骨架一致,通常为米)。\n'
-               '0 = 自动:只在『手长处于小臂 10%~90%』的正常帧上取中位数,'
-               '飞掉的帧不参与;几乎全坏时用 0.40×小臂长。\n'
-               '自动结果不合适就在这里手动填(修复完成弹窗会显示自动值)。'))
-        blf.addRow(tr('手长 (0=自动):'), self.hand_len_spin)
-        hands_btn = QPushButton(tr('🖐 一键修复手部 (与小臂共线)'))
-        hands_btn.setToolTip(
-            tr('把左右手(22/23)固定成小臂的刚性延长:手 = 手腕 + 小臂方向 × 恒定手长。整段一次修好,不用一帧帧拖乱飞的手。\n手长默认自动(抗飞帧污染,见「手长」提示),也可在上方手动指定。\n注意:修好后如果又插值/平滑改动了手肘或手腕,再点一次即可重新对齐。可 Ctrl+Z 撤销。'))
-        hands_btn.clicked.connect(self._fix_hands)
-        blf.addRow(hands_btn)
-        rp.addWidget(bl_g)
 
         un_g = QGroupBox(tr('撤销'))
         ug = QVBoxLayout(un_g)
@@ -613,27 +629,24 @@ class SkeletonCorrector(QMainWindow):
 
         rp.addStretch()
 
-        save_btn = QPushButton(tr('💾 保存编辑结果 (PKL/CSV)'))
-        save_btn.setStyleSheet("font-weight:bold; padding:10px;")
-        save_btn.clicked.connect(self._save)
-        rp.addWidget(save_btn)
-
         save_all_btn = QPushButton(tr('💾 保存全部已编辑动作'))
-        save_all_btn.setStyleSheet("padding:8px;")
+        save_all_btn.setStyleSheet("font-weight:bold; padding:10px;")
+        save_all_btn.setToolTip(tr('保存编辑骨架、关键帧和时间对齐进度。物理裁切视频请使用左侧「裁切对齐」。'))
         save_all_btn.clicked.connect(self._save_all)
-        rp.addWidget(save_all_btn)
 
-        prog_btn = QPushButton(tr('📌 保存进度 (JSON)'))
-        prog_btn.setStyleSheet("padding:8px;")
-        prog_btn.clicked.connect(lambda: self._save_progress())
-        rp.addWidget(prog_btn)
 
         right_scroll = QScrollArea()
         right_scroll.setWidgetResizable(True)
         right_scroll.setWidget(right_inner)
-        right_scroll.setMinimumWidth(300)
-        right_scroll.setMaximumWidth(380)
-        splitter.addWidget(right_scroll)
+        right_scroll.setMinimumWidth(360)
+        right_scroll.setMaximumWidth(440)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(right_scroll, 1)
+        # Always reachable, even when the editing tools need vertical scrolling.
+        right_layout.addWidget(save_all_btn)
+        splitter.addWidget(right_panel)
 
         # Time alignment + calibration refine live at the bottom of the LEFT
         # pane (lp), built here and appended now.
@@ -728,7 +741,7 @@ class SkeletonCorrector(QMainWindow):
         splitter.setStretchFactor(0, 0)   # left: fixed-ish
         splitter.setStretchFactor(1, 1)   # center: absorbs resize
         splitter.setStretchFactor(2, 0)   # right: fixed-ish
-        splitter.setSizes([300, 820, 340])
+        splitter.setSizes([300, 760, 400])
         root.addWidget(splitter)
 
         self._play_timer = QTimer(self)
@@ -905,6 +918,8 @@ class SkeletonCorrector(QMainWindow):
                 tr('未找到场景子文件夹。\n演员文件夹内每个场景子文件夹应包含 calibration/ 和 CSV 文件。'))
             return
 
+        if self.folder and self._cur_scene_idx >= 0:
+            self._save_progress(silent=True)
         self._actor_folder = folder
         appconfig.set_dir("skeleton_corrector_dir", folder)
         self._scenes = scenes
@@ -912,9 +927,14 @@ class SkeletonCorrector(QMainWindow):
         self.scene_combo.clear()
         for s in scenes:
             self.scene_combo.addItem(s["name"])
+        cfg = appconfig.get_value("corrector_location", {})
+        saved_scene = cfg.get("scene") if isinstance(cfg, dict) else None
+        idx = next((i for i, s in enumerate(scenes)
+                    if self._folder_key(s["path"]) == saved_scene), 0)
+        self.scene_combo.setCurrentIndex(idx)
         self.scene_combo.blockSignals(False)
         self._cur_scene_idx = -1
-        self._load_scene(0)
+        self._load_scene(idx)
 
         self.statusBar().showMessage(
             tr('已加载演员目录: {}  |  {} 个场景').format(os.path.basename(os.path.normpath(folder)), len(scenes)))
@@ -980,9 +1000,12 @@ class SkeletonCorrector(QMainWindow):
             self._sort_actions_by_qc()
 
         # Populate action list (block signals; load row 0 explicitly below)
-        self._refill_action_list()
-
-        self._load_action(0)
+        cfg = appconfig.get_value("corrector_location", {})
+        per_scene = cfg.get("scenes", {}) if isinstance(cfg, dict) else {}
+        tag = per_scene.get(self._folder_key(folder)) if isinstance(per_scene, dict) else None
+        row = next((i for i, act in enumerate(actions) if act["tag"] == tag), 0)
+        self._refill_action_list(keep_tag=actions[row]["tag"])
+        self._load_action(row)
 
         n_pkl = sum(1 for a in actions if a.get("pkl"))
         extra = tr('  |  {} 个含 mosh pkl').format(n_pkl) if n_pkl else ""
@@ -1472,6 +1495,7 @@ class SkeletonCorrector(QMainWindow):
         src_lbl = dict(srcs).get(self._skel_source, self._skel_source)
         self.statusBar().showMessage(
             tr('动作: {}  |  源: {}  |  {} 相机  |  视频 {}帧@{:.0f}fps  |  骨骼 {}帧@{:.0f}fps{}  |  {} 关节').format(act['tag'], src_lbl, len(avail), self.vtotal, self.vfps, pts3d.shape[0], self.pfps, ratio_str, pts3d.shape[1]))
+        self._remember_location()
 
     def _v2p(self, vframe: int) -> int:
         """Map video frame index to pts3d (skeleton) frame index."""
@@ -1495,63 +1519,8 @@ class SkeletonCorrector(QMainWindow):
         return lo, hi
 
     def _save(self) -> None:
-        """Save the edited skeleton via the active source.
-
-        MoSh/SMPL sources write a ``.pkl`` (Save-As, the primary output); the
-        CSV source overwrites the source CSV in place (one-time .bak)."""
-        if self.pts3d is None or self._source is None:
-            QMessageBox.information(self, tr('保存'), tr('没有加载的数据可保存。'))
-            return
-        was_playing = self.play_btn.isChecked()
-        if was_playing:
-            self.play_btn.setChecked(False)
-        try:
-            src = self._source
-            tag = (self._actions[self._cur_action_idx]["tag"]
-                   if self._cur_action_idx >= 0 else "edited")
-
-            if src.output_ext == "pkl":
-                default = src.default_output_path(self.folder, tag)
-                target, _ = QFileDialog.getSaveFileName(
-                    self, tr('保存编辑后的骨架 (PKL)'), default, "Pickle Files (*.pkl)")
-                if not target:
-                    return
-            else:
-                # CSV: overwrite source in place (back up once).
-                target = self.csv_path or src.default_output_path(self.folder, tag)
-                if not self.csv_path:
-                    target, _ = QFileDialog.getSaveFileName(
-                        self, tr('导出 3D 点为 CSV'), target, "CSV Files (*.csv)")
-                    if not target:
-                        return
-                if os.path.exists(target):
-                    bak = target + ".bak"
-                    if not os.path.exists(bak):
-                        try:
-                            import shutil
-                            shutil.copy2(target, bak)
-                        except Exception:
-                            pass
-
-            try:
-                src.save(self.pts3d, target)
-            except Exception as e:
-                QMessageBox.warning(self, tr('保存失败'), str(e))
-                return
-            # Saved to the default _edited.pkl slot -> stamp provenance so the
-            # reopen verdict can trust (and tag-check) this file.
-            if src.output_ext == "pkl":
-                act_s = (self._actions[self._cur_action_idx]
-                         if self._cur_action_idx >= 0 else None)
-                ep_s = self._edited_pkl_path(act_s, self._skel_source) if act_s else None
-                if ep_s and os.path.abspath(target) == os.path.abspath(ep_s):
-                    self._write_edited_meta(ep_s, tag, self.pts3d)
-            shape = tuple(np.asarray(self.pts3d).shape)
-            QMessageBox.information(
-                self, tr('已保存'), tr('已写入: {}  shape={}').format(os.path.basename(target), shape))
-        finally:
-            if was_playing:
-                self.play_btn.setChecked(True)
+        """Compatibility entry point: there is only one visible save action."""
+        self._save_all()
 
     @staticmethod
     def _trim_video(src: str, out: str, start: int, end: int, fps: float) -> int:
@@ -1564,33 +1533,49 @@ class SkeletonCorrector(QMainWindow):
         Sequential decode is frame-exact (the bake is one-time, so the extra
         decode cost is acceptable)."""
         cap = cv2.VideoCapture(src)
-        if not cap.isOpened():
-            return 0
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        tot = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        vw = cv2.VideoWriter(out, fourcc, fps if fps > 0 else 30.0, (w, h))
-        s = max(0, start)
-        e = min(end, tot - 1) if tot > 0 else end
-        skipped = 0
-        while skipped < s:                 # frame-exact skip of [0..s)
-            if not cap.grab():
-                vw.release()
-                cap.release()
+        writer = None
+        try:
+            if not cap.isOpened() or start < 0 or end < start:
                 return 0
-            skipped += 1
-        cur, n = s, 0
-        while cur <= e:
-            ret, frm = cap.read()
-            if not ret:
-                break
-            vw.write(frm)
-            cur += 1
-            n += 1
-        vw.release()
-        cap.release()
-        return n
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            writer = cv2.VideoWriter(out, cv2.VideoWriter_fourcc(*"mp4v"),
+                                     fps if fps > 0 else 30.0, (w, h))
+            if not writer.isOpened():
+                return 0
+            for _ in range(start):
+                if not cap.grab():
+                    return 0
+            n = 0
+            for _ in range(start, end + 1):
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                writer.write(frame)
+                n += 1
+            return n
+        finally:
+            if writer is not None:
+                writer.release()
+            cap.release()
+
+    @staticmethod
+    def _validate_video(path: str, expected: int) -> bool:
+        cap = cv2.VideoCapture(path)
+        try:
+            if not cap.isOpened():
+                return False
+            count = 0
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                if frame is None or count >= expected:
+                    return False
+                count += 1
+            return count == expected
+        finally:
+            cap.release()
 
     def _trim_align_save(self) -> None:
         """Final bake: trim the pkl to the offset-aligned window and trim every
@@ -1608,8 +1593,10 @@ class SkeletonCorrector(QMainWindow):
             QMessageBox.warning(self, tr('裁切对齐'),
                                 tr('当前源不是 mosh/SMPL,无法写 _edited.pkl。'))
             return
-        vids = {cam: self.videos.get(cam) for cam in list(self.caps.keys())
-                if self.videos.get(cam) and os.path.exists(self.videos[cam])}
+        vids = dict(act["videos"])
+        if any(not os.path.isfile(p) or cam not in self.caps for cam, p in vids.items()):
+            QMessageBox.warning(self, tr('裁切对齐'), tr('部分视角无法读取,未修改任何文件。'))
+            return
         if hi < lo or not vids:
             QMessageBox.information(self, tr('裁切对齐'), tr('没有可裁切的窗口/视频。'))
             return
@@ -1626,63 +1613,62 @@ class SkeletonCorrector(QMainWindow):
         if was_playing:
             self.play_btn.setChecked(False)
 
-        # 1) trim pkl -> _edited.pkl
+        # Build every output first. Cancellation/validation failure leaves the
+        # live skeleton, videos and progress untouched.
+        from cvslice.io.safe_write import StagedWrites
         trimmed = self.pts3d[slo:shi + 1].copy()
-        try:
-            with open(ep, "wb") as f:
-                pickle.dump(np.ascontiguousarray(trimmed, dtype=np.float32),
-                            f, protocol=2)
-            self._write_edited_meta(ep, tag, trimmed)
-        except Exception as e:
-            QMessageBox.warning(self, tr('裁切对齐'), tr('写 pkl 失败: {}').format(e))
-            return
-
-        # 2) release caps, trim each view in place (read from .bak = original)
-        for c in self.caps.values():
-            try:
-                c.release()
-            except Exception:
-                pass
-        import shutil
+        new_progress = dict(self._progress)
+        new_progress[tag] = {**new_progress.get(tag, {}), "skel_offset": 0,
+                             "view_offsets": {}, "keyframes": [],
+                             "edited_joints": [], "kf_joints": {},
+                             "trim_head": 0, "trim_tail": 0, "baked": True}
         prog = self._make_progress(tr('裁切对齐'), tr('裁切视频...'), len(vids))
-        done = []
-        shorts = []          # cams whose output has fewer frames than the window
+        prog.setAutoClose(False)
         expect = hi - lo + 1
+        released = False
+        committed = False
+        self._saving_clip = True
         try:
-            for i, (cam, path) in enumerate(vids.items()):
-                if prog.wasCanceled():
-                    break
-                prog.setLabelText(tr('裁切 {} ({}/{})').format(cam, i + 1, len(vids)))
-                prog.setValue(i)
+            with StagedWrites() as tx:
+                tmp_pkl = tx.stage(ep, backup=True)
+                with open(tmp_pkl, "wb") as f:
+                    pickle.dump(np.ascontiguousarray(trimmed, dtype=np.float32),
+                                f, protocol=2)
+                for i, (cam, path) in enumerate(vids.items()):
+                    prog.setLabelText(tr('裁切 {} ({}/{})').format(cam, i + 1, len(vids)))
+                    prog.setValue(i)
+                    QApplication.processEvents()
+                    if prog.wasCanceled():
+                        return
+                    off = self._view_offsets.get(cam, 0)
+                    tmp = tx.stage(path, backup=True)
+                    n = self._trim_video(path, tmp, lo + off, hi + off, self.vfps)
+                    if n != expect or not self._validate_video(tmp, expect):
+                        raise OSError(tr('视频裁切验证失败: {}').format(cam))
                 QApplication.processEvents()
-                off = self._view_offsets.get(cam, 0)
-                bak = path + ".bak"
-                if not os.path.exists(bak):
-                    try:
-                        shutil.copy2(path, bak)
-                    except Exception:
-                        pass
-                # ALWAYS cut from the CURRENT file: lo/hi/off are indices into
-                # the currently-open videos. On a re-bake the .bak holds the
-                # ORIGINAL (pre-first-bake) video whose frame indexing no
-                # longer matches — reading it shifted every re-baked view by
-                # the first bake's window start ("裁切了还是对不上").
-                # The .bak stays as a manual-restore backup only.
-                tmp = path + ".tmp.mp4"
-                n = self._trim_video(path, tmp, lo + off, hi + off, self.vfps)
-                if n > 0 and os.path.exists(tmp):
-                    try:
-                        os.replace(tmp, path)
-                        done.append(cam)
-                        if n != expect:
-                            shorts.append(f"{cam}: {n}/{expect}")
-                    except Exception:
-                        if os.path.exists(tmp):
-                            os.remove(tmp)
-                elif os.path.exists(tmp):
-                    os.remove(tmp)
+                if prog.wasCanceled():
+                    return
+                with open(tx.stage(self._edited_meta_path(ep)), "w", encoding="utf-8") as f:
+                    json.dump({"tag": str(tag), "n_frames": len(trimmed),
+                               "n_joints": trimmed.shape[1]}, f)
+                with open(tx.stage(self._progress_path()), "w", encoding="utf-8") as f:
+                    json.dump(new_progress, f, indent=2, ensure_ascii=False)
+                for cap in self.caps.values():
+                    cap.release()
+                released = True
+                tx.commit()
+                committed = True
+        except Exception as e:
+            QMessageBox.warning(self, tr('裁切对齐'), str(e))
+            return
         finally:
+            self._saving_clip = False
             prog.close()
+            if not committed:
+                if released:
+                    self.caps = {cam: cv2.VideoCapture(path) for cam, path in vids.items()}
+                if was_playing:
+                    self.play_btn.setChecked(True)
 
         # 3) adopt the trimmed state, reopen caps, reset offsets to 0
         self.pts3d = trimmed
@@ -1722,13 +1708,7 @@ class SkeletonCorrector(QMainWindow):
             sp.blockSignals(True)
             sp.setValue(0)
             sp.blockSignals(False)
-        # Frames are re-indexed now; the stored offsets/keyframes are stale.
-        # "baked": True lets the reopen verdict trust the shorter _edited.pkl.
-        self._progress[tag] = {**self._progress.get(tag, {}), "skel_offset": 0,
-                               "view_offsets": {}, "keyframes": [],
-                               "edited_joints": [], "kf_joints": {},
-                               "trim_head": 0, "trim_tail": 0, "baked": True}
-        self._write_progress_json()
+        self._progress = new_progress
         self.timeline = Timeline(trimmed.shape[0], self.vtotal, self.vfps)
         self.cur_frame = 0
         self._recalc_play_range()
@@ -1739,11 +1719,9 @@ class SkeletonCorrector(QMainWindow):
         self._show_frame()
         if was_playing:
             self.play_btn.setChecked(True)
-        extra = (tr('\n⚠ 以下视角实际写出帧数与窗口不符(可能源视频提前结束): {}')
-                 .format(", ".join(shorts)) if shorts else "")
         QMessageBox.information(
             self, tr('裁切对齐完成'),
-            tr('pkl: {}→{} 帧 → {}\n视频: 覆盖 {}/{} 个视角 (源已 .bak 备份)\n窗口 视频[{}..{}];offset 已归零,pkl 与各视角逐帧对齐。\n重做: 用各 .bak 恢复并删除 {}。').format(n_full, trimmed.shape[0], os.path.basename(ep), len(done), len(vids), lo, hi, os.path.basename(ep)) + extra)
+            tr('已裁切骨架和全部 {} 个视角,offset 已归零。原文件保留 .bak 备份。').format(len(vids)))
 
     def _save_all(self) -> None:
         """Save every edited action at once to its default output path.
@@ -1761,33 +1739,34 @@ class SkeletonCorrector(QMainWindow):
         try:
             # Fold the current action's edits into the cache first.
             self._capture_current_progress()
+            self._save_ui_settings()
+            self._remember_location()
             if not self._edited:
+                self._write_progress_json(strict=True)
                 QMessageBox.information(
-                    self, tr('保存全部'), tr('还没有任何已编辑的动作可保存。'))
+                    self, tr('保存全部'), tr('已保存关键帧、时间对齐和界面设置;没有待写入的骨架修改。'))
                 return
             by_tag = {a["tag"]: a for a in self._actions}
             written, failed = [], []
-            import shutil
             for tag, info in self._edited.items():
+                if tag in self._exported:
+                    continue
                 act = by_tag.get(tag)
                 if act is None:
                     continue
                 sources = {s.key: s for s in self._build_sources(act)}
-                src = sources.get(info["source"]) or sources.get("csv")
+                src = sources.get(info["source"])
                 if src is None:
                     failed.append(tr('{}: 无可用数据源').format(tag))
                     continue
                 target = src.default_output_path(self.folder, tag)
                 try:
-                    if src.output_ext == "csv" and os.path.exists(target):
-                        bak = target + ".bak"
-                        if not os.path.exists(bak):
-                            shutil.copy2(target, bak)
-                    src.save(info["pts"], target)
+                    self._save_source(src, info["pts"], target, tag)
                     written.append(os.path.basename(target))
                 except Exception as e:
                     failed.append(f"{tag}: {e}")
-            msg = tr('已保存 {} 个动作。').format(len(written))
+            self._write_progress_json(strict=True)
+            msg = tr('已保存 {} 个动作,以及关键帧和时间对齐进度。').format(len(written))
             if written:
                 msg += "\n" + "\n".join(written[:12])
                 if len(written) > 12:
@@ -1795,6 +1774,8 @@ class SkeletonCorrector(QMainWindow):
             if failed:
                 msg += tr('\n\n失败 ') + str(len(failed)) + tr(' 个:\n') + "\n".join(failed[:6])
             QMessageBox.information(self, tr('保存全部'), msg)
+        except Exception as e:
+            QMessageBox.warning(self, tr('保存失败'), str(e))
         finally:
             if was_playing:
                 self.play_btn.setChecked(True)
@@ -1828,6 +1809,16 @@ class SkeletonCorrector(QMainWindow):
     @staticmethod
     def _edited_meta_path(ep: str) -> str:
         return ep + ".meta.json"
+
+    def _save_source(self, src, pts, target, tag) -> None:
+        from cvslice.io.safe_write import StagedWrites
+        with StagedWrites() as tx:
+            src.save(pts, tx.stage(target, backup=(src.output_ext == "csv")))
+            if src.output_ext == "pkl":
+                with open(tx.stage(self._edited_meta_path(target)), "w", encoding="utf-8") as f:
+                    json.dump({"tag": str(tag), "n_frames": int(pts.shape[0]),
+                               "n_joints": int(pts.shape[1])}, f)
+            tx.commit()
 
     def _write_edited_meta(self, ep: str, tag, arr) -> None:
         """Provenance sidecar: record WHICH action wrote this ``_edited.pkl``.
@@ -1890,24 +1881,25 @@ class SkeletonCorrector(QMainWindow):
         if not ep:
             return False
         try:
-            arr = np.ascontiguousarray(info["pts"], dtype=np.float32)
-            with open(ep, "wb") as f:
-                pickle.dump(arr, f, protocol=2)
-            self._write_edited_meta(ep, tag, arr)
+            src = next((s for s in self._build_sources(act) if s.key == info["source"]), None)
+            if src is None:
+                return False
+            self._save_source(src, info["pts"], ep, tag)
             return True
         except Exception:
             return False
 
-    def _write_progress_json(self) -> None:
+    def _write_progress_json(self, *, strict: bool = False) -> None:
         """Dump the offsets/keyframes index to corrector_progress.json (silent)."""
         p = self._progress_path()
         if not p:
             return
         try:
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(self._progress, f, indent=2, ensure_ascii=False)
+            from cvslice.io.safe_write import atomic_json
+            atomic_json(p, self._progress)
         except Exception:
-            pass
+            if strict:
+                raise
 
     def _persist_edits_to_pkl(self) -> int:
         """Write every session-edited mosh action to its ``<base>_edited.pkl``,
@@ -1919,7 +1911,7 @@ class SkeletonCorrector(QMainWindow):
         """Snapshot the current action's offsets/edits/keyframes into
         self._progress, and cache the edited skeleton in memory so it survives
         action switches."""
-        if self._cur_action_idx < 0:
+        if not (0 <= self._cur_action_idx < len(self._actions)):
             return
         tag = self._actions[self._cur_action_idx]["tag"]
         entry = {
@@ -1965,6 +1957,12 @@ class SkeletonCorrector(QMainWindow):
     # --------------------------------------------------------------- render
     def _show_frame(self) -> None:
         if self.pts3d is None:
+            return
+        if self._play_hi < self._play_lo:
+            self.frame_lbl.setText(tr('没有共同有效帧,请减小裁切或 offset。'))
+            self.vid_top.setPixmap(QPixmap())
+            self.vid_bot.setPixmap(QPixmap())
+            self._proj_L = self._proj_R = None
             return
         pidx = self._v2p(self.cur_frame)
         ratio_str = f"  skel:{pidx}" if abs(self.pfps - self.vfps) > 0.1 else ""
@@ -2763,12 +2761,15 @@ class SkeletonCorrector(QMainWindow):
     def _copy_joints(self) -> None:
         if self.pts3d is None:
             return
-        joints = sorted(self.edited_joints)
+        pidx = self._v2p(self.cur_frame)
+        # Frame-local pins are the explicit selection; only a frame with no
+        # pins falls back to the clip-wide edited set (the previous behavior).
+        joints = sorted(j for j in (self._kf_joints.get(pidx) or self.edited_joints)
+                        if 0 <= j < self.pts3d.shape[1])
         if not joints:
             self.statusBar().showMessage(
                 tr('选中集为空 — 先点击关节或「本帧全选关节」。'))
             return
-        pidx = self._v2p(self.cur_frame)
         self._joint_clip = {j: self.pts3d[pidx, j].copy() for j in joints}
         self._joint_clip_nj = self.pts3d.shape[1]
         self.statusBar().showMessage(
@@ -3634,50 +3635,6 @@ class SkeletonCorrector(QMainWindow):
             self.statusBar().showMessage(
                 tr('关键帧 skel {} 已存在(当前没有已编辑关节可锚定)。').format(pidx))
 
-    def _apply_post_smooth(self) -> None:
-        """One-shot post-annotation smoothing on the edited joints: median
-        de-spike + speed-adaptive One-Euro (jitter smoothed, fast motion kept)."""
-        if self.pts3d is None or not self.edited_joints:
-            QMessageBox.information(
-                self, tr('平滑后处理'), tr("没有'已编辑关节'可处理。先拖动/填充一些关节。"))
-            return
-        kfs = sorted(self._keyframes)
-        fa, fb = (kfs[0], kfs[-1]) if len(kfs) >= 2 else (0, self.pts3d.shape[0] - 1)
-        strength = float(self.post_strength.value())
-        dt = 1.0 / max(self.pfps, 1.0)
-        joints = [j for j in sorted(self.edited_joints) if j < self.pts3d.shape[1]]
-        self._push_undo()
-        self.pts3d = smooth_post_process(
-            self.pts3d, joints, dt, frame_a=fa, frame_b=fb,
-            despike_window=3 if self.post_despike.isChecked() else 0,
-            min_cutoff=1.0 / strength, beta=3.0)
-        self._show_frame()
-        QMessageBox.information(
-            self, tr('平滑后处理完成'),
-            tr('已对 {} 个已编辑关节 / skel[{}..{}] 做{}自适应平滑(强度 {:g})。\n快速动作已保留;不满意可撤销。').format(len(joints), fa, fb, tr('去尖刺+') if self.post_despike.isChecked() else '', strength))
-
-    def _apply_bone_constraint(self) -> None:
-        """Enforce reference (median) bone lengths over the keyframe range (or
-        whole clip), preserving joint directions. Stabilises floated joints."""
-        if self.pts3d is None:
-            return
-        if self.pts3d.shape[1] != 24:
-            QMessageBox.information(self, tr('骨长约束'),
-                                   tr('当前骨架不是 SMPL-24,暂不支持骨长约束。'))
-            return
-        kfs = sorted(self._keyframes)
-        fa, fb = (kfs[0], kfs[-1]) if len(kfs) >= 2 else (0, self.pts3d.shape[0] - 1)
-        strength = float(self.bone_strength.value())
-        ref = reference_bone_lengths(self.pts3d, SMPL24_PARENTS)
-        self._push_undo()
-        self.pts3d = enforce_bone_lengths(
-            self.pts3d, SMPL24_PARENTS, ref, strength=strength,
-            frame_a=fa, frame_b=fb)
-        self._show_frame()
-        QMessageBox.information(
-            self, tr('骨长约束完成'),
-            tr('已对 skel[{}..{}] 按中位骨长(强度 {:g})约束。\n保持了关节朝向,只改骨长;不满意可撤销。').format(fa, fb, strength))
-
     def _fix_hands(self) -> None:
         """One-click rigid hands: lock L/R hand (22/23) onto the forearm line
         at a constant hand length (auto-robust or the manual 手长 spin value),
@@ -3831,23 +3788,12 @@ class SkeletonCorrector(QMainWindow):
                 tr('没有可插值的关节。\n每个关节需要在 ≥2 个关键帧上被拖动过,才能在它们之间插值。') + skip_note)
             return
 
-        if not has_orig:
-            # No pristine baseline -> plain interpolation over the global range
-            # for the qualifying joints' span.
-            kfs = sorted(self._keyframes)
-            if len(kfs) >= 2:
-                self._push_undo()
-                self.pts3d[kfs[0]:kfs[-1] + 1] = interpolate_all_joints(
-                    self.pts3d, kfs[0], kfs[-1], method, keyframes=kfs)
-                self._show_frame()
-            return
-
         smooth = float(self.kf_smooth.value())
-        mode = "replace" if self.replace_mode_cb.isChecked() else "offset"
+        mode = "replace" if self.replace_mode_cb.isChecked() or not has_orig else "offset"
         self._push_undo()
         out, _rep, _n, sig = interpolate_per_joint(
-            self.pts3d, self.pts3d_orig, jk, method,
-            parents=SMPL24_PARENTS, smooth=smooth, mode=mode)
+            self.pts3d, self.pts3d_orig if has_orig else self.pts3d.copy(), jk, method,
+            parents=SMPL24_PARENTS, smooth=smooth, auto_soft=False, mode=mode)
         self.pts3d = out
         self._show_frame()
         npins = sum(len(fs) for fs in jk.values())
@@ -4146,9 +4092,14 @@ class SkeletonCorrector(QMainWindow):
                 lo += 1
             while hi >= lo and not skel_ok(hi):
                 hi -= 1
-        if hi < lo:
-            hi = lo
         self._play_lo, self._play_hi = lo, hi
+        valid = lo <= hi
+        self.slider.setEnabled(valid)
+        self.play_btn.setEnabled(valid)
+        if not valid:
+            self.play_btn.setChecked(False)
+            self._show_frame()
+            return
         self.slider.blockSignals(True)
         self.slider.setRange(lo, hi)
         self.slider.blockSignals(False)
@@ -4188,12 +4139,15 @@ class SkeletonCorrector(QMainWindow):
         self._show_frame()
 
     def _step(self, n: int) -> None:
-        if self.vtotal <= 0:
+        if self.vtotal <= 0 or self._play_hi < self._play_lo:
             return
         self.cur_frame = max(self._play_lo, min(self._play_hi, self.cur_frame + n))
         self.slider.setValue(self.cur_frame)
 
     def _toggle_play(self, checked: bool) -> None:
+        if checked and self._play_hi < self._play_lo:
+            self.play_btn.setChecked(False)
+            return
         if checked:
             interval = max(15, int(1000 / max(1.0, self.vfps)))
             self._play_timer.start(interval)
@@ -4203,7 +4157,7 @@ class SkeletonCorrector(QMainWindow):
             self.play_btn.setText("▶")
 
     def _tick(self) -> None:
-        if self.vtotal <= 0:
+        if self.vtotal <= 0 or self._play_hi < self._play_lo:
             self.play_btn.setChecked(False)
             return
         nf = self.cur_frame + 1
@@ -4229,6 +4183,8 @@ class SkeletonCorrector(QMainWindow):
     _SPIN_EDIT_KEYS = frozenset({Qt.Key_Left, Qt.Key_Right})
 
     def _handle_nav_key(self, k: int) -> bool:
+        if getattr(self, "_saving_clip", False):
+            return True
         """Run a nav/playback action for key *k*. Returns True if handled."""
         if k == Qt.Key_Space:
             self.play_btn.toggle()
@@ -4329,7 +4285,7 @@ class SkeletonCorrector(QMainWindow):
                 nt = i18n.retranslate(tt)
                 if nt:
                     w.setToolTip(nt)
-            if isinstance(w, (QLabel, QPushButton, QCheckBox)):
+            if isinstance(w, (QLabel, QPushButton, QCheckBox, QToolButton)):
                 nt = i18n.retranslate(w.text())
                 if nt:
                     w.setText(nt)
@@ -4354,6 +4310,8 @@ class SkeletonCorrector(QMainWindow):
 
     # --------------------------------------------------------- shutdown
     def closeEvent(self, event):  # noqa: N802
+        self._remember_location()
+        self._save_ui_settings()
         # Auto-save progress + edited skeletons so reopening restores them.
         try:
             self._save_progress(silent=True)

@@ -62,6 +62,42 @@ def retranslate(text: str) -> str | None:
 # --------------------------------------------------------------------------
 # Chinese source string -> English. Format slots ({}, {:.1f}, ...) MUST match.
 EN: dict[str, str] = {
+    "上一帧 (F)": "Previous frame (F)",
+    "上一关键帧 (G)": "Previous keyframe (G)",
+    "复制姿态": "Copy pose",
+    "粘贴姿态": "Paste pose",
+    "复制关节 (本帧)": "Copy joints here",
+    "粘贴关节": "Paste joints",
+    "替换中间原始轨迹": "Replace in-between motion",
+    "手部共线修复": "Straighten hands",
+    "一键修复手部": "Fix both hands",
+    "0=自动估计手长;非零值使用骨架的长度单位(通常为米)。":
+        "0 estimates hand length automatically; other values use skeleton units (usually metres).",
+    "将左右手固定成小臂的共线延长,整段生效。可撤销。":
+        "Extend both hands along the forearm direction for the whole clip. Undo is available.",
+    "本帧有已标关节时只复制这些关节;本帧没有标记时,复制整个动作的已编辑关节。":
+        "Copy only joints pinned on this frame. If there are no pins here, copy all edited joints in the clip.",
+    "只平滑关键帧之间的生成轨迹,人工 pin 保持原位。0=关闭平滑。":
+        "Smooth only the generated trajectory between pins. Authored pins stay fixed. 0 disables smoothing.",
+    "关键帧插值": "Interpolate pins",
+    "每个关节至少两个 pin 才会插值。人工 pin、未编辑关节和区间外的帧保持不变。完成后请播放检查。":
+        "Each joint needs at least two pins. Pins, untouched joints and frames outside its span stay unchanged. Play back to check the result.",
+    "相机引导填充": "Camera-assisted fill",
+    "可选的模型辅助填充,需要 2D 姿态模型,可能较慢。遮挡和标定误差会影响结果,请检查,不满意可撤销。":
+        "Optional assistance using a 2D pose model; may be slow. Occlusion and calibration errors affect results. Check the result and undo if needed.",
+    "保存编辑骨架、关键帧和时间对齐进度。物理裁切视频请使用左侧「裁切对齐」。":
+        "Save edited skeletons, pins and alignment progress. Use Trim & align on the left to physically trim videos.",
+    "已保存关键帧、时间对齐和界面设置;没有待写入的骨架修改。":
+        "Pins, alignment and UI settings saved; no changed skeletons to write.",
+    "已保存 {} 个动作,以及关键帧和时间对齐进度。":
+        "Saved {} actions, plus pins and alignment progress.",
+    "没有共同有效帧,请减小裁切或 offset。":
+        "No shared valid frames. Reduce trimming or offsets.",
+    "部分视角无法读取,未修改任何文件。":
+        "Some camera videos cannot be read. No files were changed.",
+    "视频裁切验证失败: {}": "Trimmed video validation failed: {}",
+    "已裁切骨架和全部 {} 个视角,offset 已归零。原文件保留 .bak 备份。":
+        "Trimmed the skeleton and all {} views; offsets reset. Original files have .bak backups.",
     "CVSlice — 骨骼矫正器 (Skeleton Corrector)":
         "CVSlice — Skeleton Corrector",
     "文件": "File",
